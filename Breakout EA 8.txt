@@ -207,6 +207,16 @@ void InitializeTradingSymbols()
 } 
 
 //+------------------------------------------------------------------+
+//| Convert datetime to date-only string (YYYY.MM.DD)               |
+//+------------------------------------------------------------------+
+string DateToString(datetime dt)
+{
+    MqlDateTime mdt;
+    TimeToStruct(dt, mdt);
+    return StringFormat("%04d.%02d.%02d", mdt.year, mdt.mon, mdt.day);
+}
+
+//+------------------------------------------------------------------+
 //| Convert Date String to Integer (YYYYMMDD format)                 |
 //+------------------------------------------------------------------+
 int DateStringToInt(const string dateStr)
@@ -1997,6 +2007,7 @@ bool ExecuteBreakoutTrade(const string symbol, const int index)
     }
 }
 //+------------------------------------------------------------------+
+
 
 
 
