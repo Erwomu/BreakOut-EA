@@ -1596,12 +1596,25 @@ bool CheckBreakout(const string symbol, const int index, ENUM_ORDER_TYPE &orderT
     g_htfData[index].breakoutUp = false;
     g_htfData[index].breakoutDown = false;
     
+    // CRITICAL: Check if we already traded today
     if(AlreadyTradedToday(symbol))
     {
         return false;
     }
     
-    // ... existing code ...
+    // ADD THESE LINES - Declare the variables BEFORE using them:
+    double closeD1[];
+    if(CopyClose(symbol, PERIOD_D1, 0, 1, closeD1) <= 0)
+        return false;
+    
+    double currentPriceD1 = closeD1[0];
+    
+    double closeH4[];
+    if(CopyClose(symbol, PERIOD_H4, 1, 1, closeH4) <= 0)
+        return false;
+    
+    double prevH4Close = closeH4[0];
+    // END OF ADDED SECTION
     
     // Check BREAKOUT UP
     if(currentPriceD1 > g_htfData[index].high && 
@@ -1609,7 +1622,7 @@ bool CheckBreakout(const string symbol, const int index, ENUM_ORDER_TYPE &orderT
     {
         orderType = ORDER_TYPE_BUY;
         breakLevel = g_htfData[index].high;
-        g_htfData[index].breakoutUp = true;  // ADD THIS LINE
+        g_htfData[index].breakoutUp = true;
         
         PrintFormat("🔥 %s: BREAKOUT UP | D1: %.5f > High: %.5f", 
                    symbol, currentPriceD1, g_htfData[index].high);
@@ -1622,7 +1635,7 @@ bool CheckBreakout(const string symbol, const int index, ENUM_ORDER_TYPE &orderT
     {
         orderType = ORDER_TYPE_SELL;
         breakLevel = g_htfData[index].low;
-        g_htfData[index].breakoutDown = true;  // ADD THIS LINE
+        g_htfData[index].breakoutDown = true;
         
         PrintFormat("🔥 %s: BREAKOUT DOWN | D1: %.5f < Low: %.5f", 
                    symbol, currentPriceD1, g_htfData[index].low);
@@ -1735,3 +1748,4 @@ bool ExecuteTrade(const string symbol, const int index, const ENUM_ORDER_TYPE or
     return false;
 }
 //+------------------------------------------------------------------+
+
