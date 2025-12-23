@@ -687,51 +687,76 @@ double GetATRValue(const int index)
 }
 
 //+------------------------------------------------------------------+
-//| SIMPLE: Check if we already traded this symbol today            |
+//| BULLETPROOF: Check if we already traded this symbol today       |
 //+------------------------------------------------------------------+
 bool AlreadyTradedToday(const string symbol)
 {
-    datetime todayD1 = iTime(symbol, PERIOD_D1, 0);
+    datetime todayStart = iTime(symbol, PERIOD_D1, 0);
     
-    // Check open positions first
+    if(todayStart == 0)
+    {
+        PrintFormat("ERROR: Failed to get D1 time for %s", symbol);
+        return true;  // ✅ Block trading if we can't verify
+    }
+    
+    // METHOD 1: Check currently OPEN positions
     for(int i = 0; i < PositionsTotal(); i++)
     {
         if(g_eaPosition.SelectByIndex(i))
         {
             if(g_eaPosition.Symbol() == symbol && 
                g_eaPosition.Magic() == MagicNumber &&
-               g_eaPosition.Time() >= todayD1)
+               g_eaPosition.Time() >= todayStart)
             {
+                PrintFormat("%s: Open position found from today - blocking new trade", symbol);
                 return true;
             }
         }
     }
     
-    // Check history
-    if(!HistorySelect(todayD1, TimeCurrent()))
-        return false;
+    // METHOD 2: Check CLOSED positions in history
+    datetime todayEnd = TimeCurrent() + 86400;  // Add 24 hours buffer
     
-    for(int i = HistoryDealsTotal() - 1; i >= 0; i--)
+    if(!HistorySelect(todayStart, todayEnd))
+    {
+        PrintFormat("WARNING: HistorySelect failed for %s - BLOCKING trade for safety", symbol);
+        return true;  // ✅ If history fails, block trading (safe default)
+    }
+    
+    // Check all deals in history
+    int totalDeals = HistoryDealsTotal();
+    int entryCount = 0;
+    
+    for(int i = 0; i < totalDeals; i++)
     {
         ulong ticket = HistoryDealGetTicket(i);
-        if(ticket == 0) continue;
+        if(ticket == 0) 
+            continue;
         
+        // Filter by symbol
         if(HistoryDealGetString(ticket, DEAL_SYMBOL) != symbol)
             continue;
-            
+        
+        // Filter by magic number
         if(HistoryDealGetInteger(ticket, DEAL_MAGIC) != MagicNumber)
             continue;
-            
+        
+        // Only count ENTRY deals (position opens)
         if(HistoryDealGetInteger(ticket, DEAL_ENTRY) == DEAL_ENTRY_IN)
         {
             datetime dealTime = (datetime)HistoryDealGetInteger(ticket, DEAL_TIME);
-            if(dealTime >= todayD1)
+            
+            if(dealTime >= todayStart)
             {
-                return true;
+                entryCount++;
+                PrintFormat("%s: Found ENTRY deal from today (Ticket: %I64u, Time: %s) - blocking new trade",
+                           symbol, ticket, TimeToString(dealTime));
+                return true;  // ✅ Found an entry today - block trading
             }
         }
     }
     
+    // No trades found today
     return false;
 }
 
@@ -1748,4 +1773,5 @@ bool ExecuteTrade(const string symbol, const int index, const ENUM_ORDER_TYPE or
     return false;
 }
 //+------------------------------------------------------------------+
+
 
