@@ -1571,7 +1571,10 @@ void CheckNewHTFCandle(const string symbol, const int index)
 }
 
 //+------------------------------------------------------------------+
-//| Mark Previous HTF Levels                                         |
+//| ENHANCED: Mark Previous HTF Levels                               |
+//| - Resets all direction-specific flags                            |
+//| - Stores previous D1 OHLC data                                   |
+//| - Allows fresh trades on new D1 candle                           |
 //+------------------------------------------------------------------+
 bool MarkPreviousHTF(const string symbol, const int index)
 {
@@ -1588,21 +1591,27 @@ bool MarkPreviousHTF(const string symbol, const int index)
         return false;
     }
     
+    // Store previous D1 candle data
     g_htfData[index].open = open[0];
     g_htfData[index].close = close[0];
     g_htfData[index].high = high[0];
     g_htfData[index].low = low[0];
     g_htfData[index].time = time[0];
+    
+    // ✅ CRITICAL: Reset ALL trading flags for new D1 candle
     g_htfData[index].breakoutUp = false;
     g_htfData[index].breakoutDown = false;
-    g_htfData[index].tradeExecuted = false;
+    g_htfData[index].breakLevel = 0;
+    g_htfData[index].tradeExecutedUp = false;      // Reset UP lock
+    g_htfData[index].tradeExecutedDown = false;    // Reset DOWN lock
+    g_htfData[index].tradedD1Time = 0;             // Reset timestamp
     
     if(symbol == _Symbol)
     {
         DrawHTFLevels(symbol, index);
     }
     
-    PrintFormat("%s D1: H:%.5f L:%.5f O:%.5f C:%.5f", 
+    PrintFormat("📅 %s NEW D1: H:%.5f L:%.5f O:%.5f C:%.5f | All flags reset", 
                symbol, g_htfData[index].high, g_htfData[index].low, 
                g_htfData[index].open, g_htfData[index].close);
     
@@ -1640,12 +1649,14 @@ void DrawHTFLevels(const string symbol, const int index)
     ChartRedraw();
 }
 
+
 //+------------------------------------------------------------------+
-//| FIXED: Check for Breakout - ONE TRADE PER D1 GUARANTEE          |
-//| Changes:                                                          |
+//| ENHANCED: Check for Breakout - ONE TRADE PER D1 GUARANTEE       |
+//| KEY FIXES:                                                        |
 //| 1. Removed immediate returns after setting breakout flags        |
-//| 2. Always check tradeExecuted before returning true              |
-//| 3. Added logging to track flag states                            |
+//| 2. Uses direction-specific locks (tradeExecutedUp/Down)          |
+//| 3. Always validates locks before returning true                  |
+//| 4. Comprehensive logging for debugging                           |
 //+------------------------------------------------------------------+
 bool CheckBreakout(const string symbol, const int index)
 {
@@ -1679,11 +1690,11 @@ bool CheckBreakout(const string symbol, const int index)
         g_htfData[index].breakoutUp = true;
         g_htfData[index].breakLevel = g_htfData[index].high;
         
-        PrintFormat("? %s: BREAKOUT UP FLAG SET | D1: %.5f > Prev High: %.5f | H4[1]: %.5f", 
+        PrintFormat("🔼 %s: BREAKOUT UP FLAG SET | D1: %.5f > Prev High: %.5f | H4[1]: %.5f", 
                    symbol, currentPriceD1, g_htfData[index].high, prevH4Close);
         
-        // ? REMOVED: return true;  
-        // ? Fall through to check tradeExecuted
+        // ❌ REMOVED: return true;  
+        // ✅ Fall through to check direction-specific lock
     }
     
     // ====================================================================
@@ -1696,45 +1707,60 @@ bool CheckBreakout(const string symbol, const int index)
         g_htfData[index].breakoutDown = true;
         g_htfData[index].breakLevel = g_htfData[index].low;
         
-        PrintFormat("? %s: BREAKOUT DOWN FLAG SET | D1: %.5f < Prev Low: %.5f | H4[1]: %.5f", 
+        PrintFormat("🔽 %s: BREAKOUT DOWN FLAG SET | D1: %.5f < Prev Low: %.5f | H4[1]: %.5f", 
                    symbol, currentPriceD1, g_htfData[index].low, prevH4Close);
         
-        // ? REMOVED: return true;
-        // ? Fall through to check tradeExecuted
+        // ❌ REMOVED: return true;
+        // ✅ Fall through to check direction-specific lock
     }
     
     // ====================================================================
-    // RETURN LOGIC - ALWAYS CHECK tradeExecuted (CRITICAL FIX)
+    // RETURN LOGIC - Direction-Specific Lock Validation (CRITICAL FIX)
     // ====================================================================
-    // Only return true if:
-    // 1. A breakout flag is set (UP or DOWN)
-    // 2. AND no trade has been executed yet for this D1 candle
+    // Only allow trade if:
+    // 1. Breakout UP detected AND no UP trade executed yet
+    // 2. Breakout DOWN detected AND no DOWN trade executed yet
     
-    bool breakoutExists = (g_htfData[index].breakoutUp || g_htfData[index].breakoutDown);
-    bool tradeNotExecuted = !g_htfData[index].tradeExecuted;
-    
-    // Debug logging for troubleshooting
-    if(breakoutExists)
+    // Check UP breakout eligibility
+    if(g_htfData[index].breakoutUp && !g_htfData[index].tradeExecutedUp)
     {
-        if(tradeNotExecuted)
+        PrintFormat("✅ %s: UP breakout valid - ready to trade", symbol);
+        return true;
+    }
+    
+    // Check DOWN breakout eligibility
+    if(g_htfData[index].breakoutDown && !g_htfData[index].tradeExecutedDown)
+    {
+        PrintFormat("✅ %s: DOWN breakout valid - ready to trade", symbol);
+        return true;
+    }
+    
+    // ====================================================================
+    // BLOCKED - Trade already executed for detected breakout direction
+    // ====================================================================
+    if(g_htfData[index].breakoutUp && g_htfData[index].tradeExecutedUp)
+    {
+        static datetime lastBlockLogUp = 0;
+        if(TimeCurrent() - lastBlockLogUp > 3600) // Log once per hour
         {
-            PrintFormat("? %s: Breakout valid - ready to trade (UP:%d DOWN:%d)", 
-                       symbol, g_htfData[index].breakoutUp, g_htfData[index].breakoutDown);
-        }
-        else
-        {
-            // This prevents multiple trades per D1 - this message confirms it's working
-            static datetime lastBlockLog = 0;
-            if(TimeCurrent() - lastBlockLog > 3600) // Log once per hour max
-            {
-                PrintFormat("? %s: Breakout exists but trade already executed (preventing re-entry)", 
-                           symbol);
-                lastBlockLog = TimeCurrent();
-            }
+            PrintFormat("🚫 %s: UP breakout detected but UP trade already executed (blocking)", 
+                       symbol);
+            lastBlockLogUp = TimeCurrent();
         }
     }
     
-    return breakoutExists && tradeNotExecuted;
+    if(g_htfData[index].breakoutDown && g_htfData[index].tradeExecutedDown)
+    {
+        static datetime lastBlockLogDown = 0;
+        if(TimeCurrent() - lastBlockLogDown > 3600) // Log once per hour
+        {
+            PrintFormat("🚫 %s: DOWN breakout detected but DOWN trade already executed (blocking)", 
+                       symbol);
+            lastBlockLogDown = TimeCurrent();
+        }
+    }
+    
+    return false;
 }
 
 //+------------------------------------------------------------------+
@@ -1774,8 +1800,12 @@ bool CheckEntryConfirmation(const string symbol, const int index)
 }
 
 //+------------------------------------------------------------------+
-//+------------------------------------------------------------------+
-//| Execute Breakout Trade (MinRiskReward REMOVED)                   |
+//| ENHANCED: Execute Breakout Trade                                 |
+//| KEY FEATURES:                                                     |
+//| 1. Sets direction-specific locks (tradeExecutedUp/Down)          |
+//| 2. Records D1 timestamp (tradedD1Time)                           |
+//| 3. Prevents opposite direction re-entry on same D1               |
+//| 4. Full error handling and logging                               |
 //+------------------------------------------------------------------+
 bool ExecuteBreakoutTrade(const string symbol, const int index)
 {
@@ -1804,7 +1834,11 @@ bool ExecuteBreakoutTrade(const string symbol, const int index)
     double price, sl, tp;
     ENUM_ORDER_TYPE orderType;
     string direction;
+    bool isUpTrade = false;
     
+    // ====================================================================
+    // DETERMINE TRADE DIRECTION AND CALCULATE LEVELS
+    // ====================================================================
     if(g_htfData[index].breakoutUp)
     {
         orderType = ORDER_TYPE_BUY;
@@ -1812,6 +1846,7 @@ bool ExecuteBreakoutTrade(const string symbol, const int index)
         price = g_eaSymbolInfo.Ask();
         sl = NormalizeDouble(price - (atr * ATRStopLoss), g_eaSymbolInfo.Digits());
         tp = NormalizeDouble(price + (atr * ATRTakeProfit), g_eaSymbolInfo.Digits());
+        isUpTrade = true;
     }
     else if(g_htfData[index].breakoutDown)
     {
@@ -1820,33 +1855,71 @@ bool ExecuteBreakoutTrade(const string symbol, const int index)
         price = g_eaSymbolInfo.Bid();
         sl = NormalizeDouble(price + (atr * ATRStopLoss), g_eaSymbolInfo.Digits());
         tp = NormalizeDouble(price - (atr * ATRTakeProfit), g_eaSymbolInfo.Digits());
+        isUpTrade = false;
     }
     else
     {
+        PrintFormat("ERROR: %s - No valid breakout direction", symbol);
         return false;
     }
     
-    // MinRiskReward check REMOVED - trades will execute without R:R validation
-    
+    // ====================================================================
+    // EXECUTE TRADE
+    // ====================================================================
     bool result = g_eaTrade.PositionOpen(symbol, orderType, lotSize, price, sl, tp, 
                                         StringFormat("Breakout_%s", direction));
     
     if(result && g_eaTrade.ResultRetcode() == TRADE_RETCODE_DONE)
     {
-        PrintFormat("â? %s %s OPENED | Lot:%.2f | Price:%.5f | SL:%.5f | TP:%.5f | ATR:%.5f",
-                   symbol, direction, lotSize, price, sl, tp, atr);
+        // ✅ CRITICAL: Set direction-specific lock IMMEDIATELY
+        if(isUpTrade)
+        {
+            g_htfData[index].tradeExecutedUp = true;
+            PrintFormat("🔒 %s: UP direction LOCKED for this D1 candle", symbol);
+        }
+        else
+        {
+            g_htfData[index].tradeExecutedDown = true;
+            PrintFormat("🔒 %s: DOWN direction LOCKED for this D1 candle", symbol);
+        }
         
+        // Store the D1 timestamp when trade was executed
+        datetime currentD1Time = iTime(symbol, PERIOD_D1, 0);
+        g_htfData[index].tradedD1Time = currentD1Time;
+        
+        // Success message with full details
+        PrintFormat("✅ %s %s OPENED | Lot:%.2f | Entry:%.5f | SL:%.5f | TP:%.5f | ATR:%.5f | D1:%s",
+                   symbol, direction, lotSize, price, sl, tp, atr,
+                   TimeToString(currentD1Time, TIME_DATE));
+        
+        // Calculate risk metrics for logging
+        double riskPips = MathAbs(price - sl) / g_eaSymbolInfo.Point() / 10;
+        double rewardPips = MathAbs(tp - price) / g_eaSymbolInfo.Point() / 10;
+        double rrRatio = rewardPips / riskPips;
+        
+        PrintFormat("   📊 Risk: %.1f pips | Reward: %.1f pips | R:R = 1:%.2f", 
+                   riskPips, rewardPips, rrRatio);
+        
+        // Update statistics
         g_stats[index].totalTrades++;
+        g_stats[index].lastTradeTime = TimeCurrent();
+        
         return true;
     }
     else
     {
-        PrintFormat("â? %s: Trade failed | Retcode:%d | Error:%s", 
-                   symbol, g_eaTrade.ResultRetcode(), g_eaTrade.ResultRetcodeDescription());
+        // Trade failed - detailed error logging
+        PrintFormat("❌ %s: Trade execution FAILED", symbol);
+        PrintFormat("   Retcode: %d | Description: %s", 
+                   g_eaTrade.ResultRetcode(), 
+                   g_eaTrade.ResultRetcodeDescription());
+        PrintFormat("   Attempted: %s %.2f lots at %.5f", 
+                   direction, lotSize, price);
+        
         return false;
     }
 }
-
 //+------------------------------------------------------------------+
+
 
 
