@@ -1556,8 +1556,7 @@ bool IsValidToTradeOnCurrentD1(const string symbol, const int index)
 }
 
 //+------------------------------------------------------------------+
-//| SAFETY MECHANISM 2: Maximum Trades Per Symbol Per Day           |
-//| Hard limit regardless of other conditions                        |
+//| ADDITIONAL FIX: Update CountSymbolTradesOnD1 Type Casting       |
 //+------------------------------------------------------------------+
 int CountSymbolTradesOnD1(const string symbol, const datetime d1Time)
 {
@@ -1565,8 +1564,9 @@ int CountSymbolTradesOnD1(const string symbol, const datetime d1Time)
         return 0;
     
     int count = 0;
+    int totalDeals = HistoryDealsTotal();  // Fix: Store as int first
     
-    for(int i = HistoryDealsTotal() - 1; i >= 0; i--)
+    for(int i = totalDeals - 1; i >= 0; i--)
     {
         ulong ticket = HistoryDealGetTicket(i);
         if(ticket == 0)
@@ -1575,10 +1575,12 @@ int CountSymbolTradesOnD1(const string symbol, const datetime d1Time)
         if(HistoryDealGetString(ticket, DEAL_SYMBOL) != symbol)
             continue;
         
-        if(HistoryDealGetInteger(ticket, DEAL_MAGIC) != MagicNumber)
+        long magic = HistoryDealGetInteger(ticket, DEAL_MAGIC);  // Fix: Store as long
+        if((int)magic != MagicNumber)  // Fix: Cast to int for comparison
             continue;
         
-        if(HistoryDealGetInteger(ticket, DEAL_ENTRY) != DEAL_ENTRY_IN)
+        long entryType = HistoryDealGetInteger(ticket, DEAL_ENTRY);  // Fix: Store as long
+        if((int)entryType != DEAL_ENTRY_IN)  // Fix: Cast to int
             continue;
         
         // Check if deal time is within current D1 candle
@@ -1589,8 +1591,6 @@ int CountSymbolTradesOnD1(const string symbol, const datetime d1Time)
     
     return count;
 }
-
-
 //+------------------------------------------------------------------+
 //| REPLACE: ProcessSymbol - Date-Based Lock Check                  |
 //+------------------------------------------------------------------+
@@ -1997,6 +1997,7 @@ bool ExecuteBreakoutTrade(const string symbol, const int index)
     }
 }
 //+------------------------------------------------------------------+
+
 
 
 
