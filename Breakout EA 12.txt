@@ -703,7 +703,7 @@ double GetATRValue(const int index)
 }
 
 //+------------------------------------------------------------------+
-//| BULLETPROOF: Check if symbol already traded today                |
+//| Already Traded Today - ENHANCED with Detailed Logging            |
 //+------------------------------------------------------------------+
 bool AlreadyTradedToday(const string symbol, const int index)
 {
@@ -714,7 +714,13 @@ bool AlreadyTradedToday(const string symbol, const int index)
     // ================================================================
     if(g_currentD1[index] == todayD1 && g_tradesExecutedToday[index] > 0)
     {
-        // Already traded this D1 candle according to our memory
+        static datetime lastLogTime[SYMBOL_COUNT];
+        if(TimeCurrent() - lastLogTime[index] > 300)  // Log every 5 minutes
+        {
+            PrintFormat("🔒 %s: Memory lock active (count: %d) for D1 %s", 
+                       symbol, g_tradesExecutedToday[index], TimeToString(todayD1, TIME_DATE));
+            lastLogTime[index] = TimeCurrent();
+        }
         return true;
     }
     
@@ -729,7 +735,7 @@ bool AlreadyTradedToday(const string symbol, const int index)
                g_eaPosition.Magic() == MagicNumber &&
                g_eaPosition.Time() >= todayD1)
             {
-                // Position found - update our memory lock
+                // Position found - sync our memory lock
                 if(g_currentD1[index] != todayD1)
                 {
                     g_currentD1[index] = todayD1;
@@ -737,6 +743,8 @@ bool AlreadyTradedToday(const string symbol, const int index)
                 }
                 g_tradesExecutedToday[index]++;
                 
+                PrintFormat("🔍 %s: Open position found for D1 %s - syncing lock", 
+                           symbol, TimeToString(todayD1, TIME_DATE));
                 return true;
             }
         }
@@ -772,6 +780,8 @@ bool AlreadyTradedToday(const string symbol, const int index)
                 }
                 g_tradesExecutedToday[index]++;
                 
+                PrintFormat("📜 %s: History deal found for D1 %s - syncing lock", 
+                           symbol, TimeToString(todayD1, TIME_DATE));
                 return true;
             }
         }
@@ -1502,20 +1512,22 @@ int CountBreakoutPositions(const string symbol)
 }
 
 //+------------------------------------------------------------------+
-//| Process Symbol                                                    |
+//| Process Symbol - FIXED with Early Lock Check                     |
 //+------------------------------------------------------------------+
 void ProcessSymbol(const string symbol, const int index)
 {
+    // ================================================================
+    // CRITICAL FIX #1: Check lock FIRST, before ANY other logic
+    // ================================================================
+    if(AlreadyTradedToday(symbol, index))
+    {
+        return;  // Exit immediately - no further processing
+    }
+    
     if(UseSessionFilter && !IsInTradingSession())
         return;
     
     ManagePositions(symbol, index);
-    
-    // SINGLE CHECK with index parameter
-    if(AlreadyTradedToday(symbol, index))
-    {
-        return;
-    }
     
     int currentPositions = CountBreakoutPositions(symbol);
     if(currentPositions >= MaxOpenPositions)
@@ -1646,19 +1658,21 @@ void DrawHTFLevels(const string symbol, const int index)
 
 
 //+------------------------------------------------------------------+
-//| SIMPLE: Check Breakout                                           |
+//| Check Breakout - FIXED with Lock Check                           |
 //+------------------------------------------------------------------+
 bool CheckBreakout(const string symbol, const int index, ENUM_ORDER_TYPE &orderType, double &breakLevel)
 {
+    // ================================================================
+    // CRITICAL FIX #2: Double-check lock inside breakout detection
+    // ================================================================
+    if(AlreadyTradedToday(symbol, index))
+    {
+        return false;  // Already traded today
+    }
+    
     // Reset flags
     g_htfData[index].breakoutUp = false;
     g_htfData[index].breakoutDown = false;
-    
-    // ? CRITICAL: Check if we already traded today
-    if(AlreadyTradedToday(symbol, index))
-    {
-        return false;
-    }
     
     double closeD1[];
     if(CopyClose(symbol, PERIOD_D1, 0, 1, closeD1) <= 0)
@@ -1680,7 +1694,7 @@ bool CheckBreakout(const string symbol, const int index, ENUM_ORDER_TYPE &orderT
         breakLevel = g_htfData[index].high;
         g_htfData[index].breakoutUp = true;
         
-        PrintFormat("? %s: BREAKOUT UP | D1: %.5f > High: %.5f", 
+        PrintFormat("🚀 %s: BREAKOUT UP | D1: %.5f > High: %.5f", 
                    symbol, currentPriceD1, g_htfData[index].high);
         return true;
     }
@@ -1693,7 +1707,7 @@ bool CheckBreakout(const string symbol, const int index, ENUM_ORDER_TYPE &orderT
         breakLevel = g_htfData[index].low;
         g_htfData[index].breakoutDown = true;
         
-        PrintFormat("? %s: BREAKOUT DOWN | D1: %.5f < Low: %.5f", 
+        PrintFormat("📉 %s: BREAKOUT DOWN | D1: %.5f < Low: %.5f", 
                    symbol, currentPriceD1, g_htfData[index].low);
         return true;
     }
@@ -1735,8 +1749,7 @@ bool CheckEntryConfirmation(const string symbol, const int index, const ENUM_ORD
 }
 
 //+------------------------------------------------------------------+
-//+------------------------------------------------------------------+
-//| Execute Trade                                                     |
+//| Execute Trade - FIXED with Better Locking and Comment            |
 //+------------------------------------------------------------------+
 bool ExecuteTrade(const string symbol, const int index, const ENUM_ORDER_TYPE orderType, const double breakLevel)
 {
@@ -1745,15 +1758,20 @@ bool ExecuteTrade(const string symbol, const int index, const ENUM_ORDER_TYPE or
     
     g_eaSymbolInfo.RefreshRates();
     
-    // ? FINAL CHECK with updated signature
+    // ================================================================
+    // CRITICAL FIX #3: FINAL lock check + atomic lock setting
+    // ================================================================
+    datetime todayD1 = iTime(symbol, PERIOD_D1, 0);
+    
+    // Check if we already traded
     if(AlreadyTradedToday(symbol, index))
     {
-        PrintFormat("?? %s: Trade already exists - aborting", symbol);
+        PrintFormat("⛔ %s: Trade already exists for D1 %s - ABORTING", 
+                   symbol, TimeToString(todayD1, TIME_DATE));
         return false;
     }
     
-    // ? SET LOCK **IMMEDIATELY** BEFORE TRADE EXECUTION
-    datetime todayD1 = iTime(symbol, PERIOD_D1, 0);
+    // SET LOCK IMMEDIATELY (atomic operation)
     if(g_currentD1[index] != todayD1)
     {
         g_currentD1[index] = todayD1;
@@ -1762,21 +1780,27 @@ bool ExecuteTrade(const string symbol, const int index, const ENUM_ORDER_TYPE or
     g_tradesExecutedToday[index]++;
     g_lastTradeTime[index] = TimeCurrent();
     
-    PrintFormat("? PRE-LOCK: %s locked for D1 %s (count: %d)", 
+    PrintFormat("🔒 PRE-LOCK SET: %s locked for D1 %s (count: %d)", 
                symbol, TimeToString(todayD1, TIME_DATE), g_tradesExecutedToday[index]);
     
+    // Get ATR
     double atr = GetATRValue(index);
     if(atr <= 0)
     {
         // Rollback lock on failure
         g_tradesExecutedToday[index]--;
+        if(g_tradesExecutedToday[index] == 0)
+            g_lastTradeTime[index] = 0;
         return false;
     }
     
+    // Calculate lot size
     double lotSize = CalculateLotSize(symbol, index, atr);
     if(lotSize < g_eaSymbolInfo.LotsMin())
     {
         g_tradesExecutedToday[index]--;
+        if(g_tradesExecutedToday[index] == 0)
+            g_lastTradeTime[index] = 0;
         return false;
     }
     
@@ -1798,9 +1822,13 @@ bool ExecuteTrade(const string symbol, const int index, const ENUM_ORDER_TYPE or
         tp = NormalizeDouble(price - (atr * ATRTakeProfit), g_eaSymbolInfo.Digits());
     }
     
+    // ================================================================
+    // FIX #4: Ensure comment is ALWAYS set correctly
+    // ================================================================
     string dateStr = TimeToString(todayD1, TIME_DATE);
     string tradeComment = StringFormat("Breakout_%s_%s", direction, dateStr);
     
+    // Open position with explicit comment
     bool result = g_eaTrade.PositionOpen(symbol, orderType, lotSize, price, sl, tp, tradeComment);
     
     if(result && g_eaTrade.ResultRetcode() == TRADE_RETCODE_DONE)
@@ -1808,10 +1836,11 @@ bool ExecuteTrade(const string symbol, const int index, const ENUM_ORDER_TYPE or
         double riskPips = MathAbs(price - sl) / g_eaSymbolInfo.Point() / 10;
         double rewardPips = MathAbs(tp - price) / g_eaSymbolInfo.Point() / 10;
         
-        PrintFormat("? TRADE EXECUTED & LOCKED");
+        PrintFormat("✅ TRADE EXECUTED & LOCKED");
         PrintFormat("  %s %s | Lot: %.2f | Entry: %.5f", symbol, direction, lotSize, price);
         PrintFormat("  SL: %.5f | TP: %.5f", sl, tp);
         PrintFormat("  Risk: %.1f pips | Reward: %.1f pips", riskPips, rewardPips);
+        PrintFormat("  Comment: %s", tradeComment);
         
         g_stats[index].totalTrades++;
         g_stats[index].lastTradeTime = TimeCurrent();
@@ -1826,9 +1855,10 @@ bool ExecuteTrade(const string symbol, const int index, const ENUM_ORDER_TYPE or
         g_lastTradeTime[index] = 0;
     }
     
-    PrintFormat("? TRADE FAILED (lock rolled back): %s | Retcode: %d", 
-               symbol, g_eaTrade.ResultRetcode());
+    PrintFormat("❌ TRADE FAILED (lock rolled back): %s | Retcode: %d (%s)", 
+               symbol, g_eaTrade.ResultRetcode(), g_eaTrade.ResultRetcodeDescription());
     return false;
 }
 //+------------------------------------------------------------------+
+
 
