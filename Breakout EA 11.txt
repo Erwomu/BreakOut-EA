@@ -110,6 +110,8 @@ struct HTFData
     double low;
     datetime time;
     double breakLevel;
+    bool breakoutUp;      // ADD THIS LINE
+    bool breakoutDown;    // ADD THIS LINE
     
     void Reset()
     {
@@ -119,6 +121,8 @@ struct HTFData
         low = 0;
         time = 0;
         breakLevel = 0;
+        breakoutUp = false;      // ADD THIS LINE
+        breakoutDown = false;    // ADD THIS LINE
     }
     
     HTFData()
@@ -1428,6 +1432,28 @@ void OnTimer()
     {
         UpdateDashboard();
     }
+} 
+
+//+------------------------------------------------------------------+
+//| Count Breakout Positions for Symbol                              |
+//+------------------------------------------------------------------+
+int CountBreakoutPositions(const string symbol)
+{
+    int count = 0;
+    
+    for(int i = 0; i < PositionsTotal(); i++)
+    {
+        if(g_eaPosition.SelectByIndex(i))
+        {
+            if(g_eaPosition.Symbol() == symbol && 
+               g_eaPosition.Magic() == MagicNumber)
+            {
+                count++;
+            }
+        }
+    }
+    
+    return count;
 }
 
 //+------------------------------------------------------------------+
@@ -1566,23 +1592,16 @@ void DrawHTFLevels(const string symbol, const int index)
 //+------------------------------------------------------------------+
 bool CheckBreakout(const string symbol, const int index, ENUM_ORDER_TYPE &orderType, double &breakLevel)
 {
-    // CRITICAL: Check if we already traded today
+    // Reset flags
+    g_htfData[index].breakoutUp = false;
+    g_htfData[index].breakoutDown = false;
+    
     if(AlreadyTradedToday(symbol))
     {
         return false;
     }
     
-    double closeD1[];
-    if(CopyClose(symbol, PERIOD_D1, 0, 1, closeD1) <= 0)
-        return false;
-    
-    double currentPriceD1 = closeD1[0];
-    
-    double closeH4[];
-    if(CopyClose(symbol, PERIOD_H4, 1, 1, closeH4) <= 0)
-        return false;
-    
-    double prevH4Close = closeH4[0];
+    // ... existing code ...
     
     // Check BREAKOUT UP
     if(currentPriceD1 > g_htfData[index].high && 
@@ -1590,8 +1609,9 @@ bool CheckBreakout(const string symbol, const int index, ENUM_ORDER_TYPE &orderT
     {
         orderType = ORDER_TYPE_BUY;
         breakLevel = g_htfData[index].high;
+        g_htfData[index].breakoutUp = true;  // ADD THIS LINE
         
-        PrintFormat("? %s: BREAKOUT UP | D1: %.5f > High: %.5f", 
+        PrintFormat("🔥 %s: BREAKOUT UP | D1: %.5f > High: %.5f", 
                    symbol, currentPriceD1, g_htfData[index].high);
         return true;
     }
@@ -1602,8 +1622,9 @@ bool CheckBreakout(const string symbol, const int index, ENUM_ORDER_TYPE &orderT
     {
         orderType = ORDER_TYPE_SELL;
         breakLevel = g_htfData[index].low;
+        g_htfData[index].breakoutDown = true;  // ADD THIS LINE
         
-        PrintFormat("? %s: BREAKOUT DOWN | D1: %.5f < Low: %.5f", 
+        PrintFormat("🔥 %s: BREAKOUT DOWN | D1: %.5f < Low: %.5f", 
                    symbol, currentPriceD1, g_htfData[index].low);
         return true;
     }
@@ -1714,6 +1735,7 @@ bool ExecuteTrade(const string symbol, const int index, const ENUM_ORDER_TYPE or
     return false;
 }
 //+------------------------------------------------------------------+
+
 
 
 
