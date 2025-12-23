@@ -111,20 +111,26 @@ struct HTFData
     bool breakoutUp;
     bool breakoutDown;
     double breakLevel;
-    bool tradeExecuted;
+    
+    // ✅ NEW: Direction-specific locks
+    bool tradeExecutedUp;      // Prevents multiple UP trades per D1
+    bool tradeExecutedDown;    // Prevents multiple DOWN trades per D1
+    datetime tradedD1Time;     // Timestamp of D1 candle when trade opened
     
     void Reset()
-    {
-        open = 0;
-        close = 0;
-        high = 0;
-        low = 0;
-        time = 0;
-        breakoutUp = false;
-        breakoutDown = false;
-        breakLevel = 0;
-        tradeExecuted = false;
-    }
+{
+    open = 0;
+    close = 0;
+    high = 0;
+    low = 0;
+    time = 0;
+    breakoutUp = false;
+    breakoutDown = false;
+    breakLevel = 0;
+    tradeExecutedUp = false;      // ✅ NEW
+    tradeExecutedDown = false;    // ✅ NEW
+    tradedD1Time = 0;             // ✅ NEW
+}
     
     HTFData()
     {
@@ -309,7 +315,7 @@ RejectionSignal PricePosition(const string symbol, double keyLevel)
     {
         signal.isBullishRejection = true;
         signal.rejectionType = "PIN_BAR";
-        PrintFormat("â? %s BULLISH PIN_BAR | Level: %.5f | Wick: %.1f%% Body: %.1f%%", 
+        PrintFormat("Ã¢Â? %s BULLISH PIN_BAR | Level: %.5f | Wick: %.1f%% Body: %.1f%%", 
                    symbol, keyLevel, lowerWickRatio * 100, bodyRatio * 100);
     }
     
@@ -321,7 +327,7 @@ RejectionSignal PricePosition(const string symbol, double keyLevel)
     {
         signal.isBullishRejection = true;
         signal.rejectionType = "ENGULFING";
-        PrintFormat("â? %s BULLISH ENGULFING | Level: %.5f", symbol, keyLevel);
+        PrintFormat("Ã¢Â? %s BULLISH ENGULFING | Level: %.5f", symbol, keyLevel);
     }
     
     // PATTERN 3: Bullish Inside Bar
@@ -331,7 +337,7 @@ RejectionSignal PricePosition(const string symbol, double keyLevel)
     {
         signal.isBullishRejection = true;
         signal.rejectionType = "INSIDE_BAR";
-        PrintFormat("â? %s BULLISH INSIDE_BAR | Level: %.5f", symbol, keyLevel);
+        PrintFormat("Ã¢Â? %s BULLISH INSIDE_BAR | Level: %.5f", symbol, keyLevel);
     }
     
     // PATTERN 4: Bullish Harami
@@ -342,7 +348,7 @@ RejectionSignal PricePosition(const string symbol, double keyLevel)
     {
         signal.isBullishRejection = true;
         signal.rejectionType = "HARAMI";
-        PrintFormat("â? %s BULLISH HARAMI | Level: %.5f", symbol, keyLevel);
+        PrintFormat("Ã¢Â? %s BULLISH HARAMI | Level: %.5f", symbol, keyLevel);
     }
     
     // ====================================================================
@@ -354,7 +360,7 @@ RejectionSignal PricePosition(const string symbol, double keyLevel)
     {
         signal.isBearishRejection = true;
         signal.rejectionType = "SHOOTING_STAR";
-        PrintFormat("â? %s BEARISH SHOOTING_STAR | Level: %.5f | Wick: %.1f%% Body: %.1f%%", 
+        PrintFormat("Ã¢Â? %s BEARISH SHOOTING_STAR | Level: %.5f | Wick: %.1f%% Body: %.1f%%", 
                    symbol, keyLevel, upperWickRatio * 100, bodyRatio * 100);
     }
     
@@ -366,7 +372,7 @@ RejectionSignal PricePosition(const string symbol, double keyLevel)
     {
         signal.isBearishRejection = true;
         signal.rejectionType = "ENGULFING";
-        PrintFormat("â? %s BEARISH ENGULFING | Level: %.5f", symbol, keyLevel);
+        PrintFormat("Ã¢Â? %s BEARISH ENGULFING | Level: %.5f", symbol, keyLevel);
     }
     
     // PATTERN 3: Bearish Inside Bar
@@ -376,7 +382,7 @@ RejectionSignal PricePosition(const string symbol, double keyLevel)
     {
         signal.isBearishRejection = true;
         signal.rejectionType = "INSIDE_BAR";
-        PrintFormat("â? %s BEARISH INSIDE_BAR | Level: %.5f", symbol, keyLevel);
+        PrintFormat("Ã¢Â? %s BEARISH INSIDE_BAR | Level: %.5f", symbol, keyLevel);
     }
     
     // PATTERN 4: Bearish Harami
@@ -387,7 +393,7 @@ RejectionSignal PricePosition(const string symbol, double keyLevel)
     {
         signal.isBearishRejection = true;
         signal.rejectionType = "HARAMI";
-        PrintFormat("â? %s BEARISH HARAMI | Level: %.5f", symbol, keyLevel);
+        PrintFormat("Ã¢Â? %s BEARISH HARAMI | Level: %.5f", symbol, keyLevel);
     }
     
     return signal;
@@ -447,7 +453,7 @@ double CalculateDynamicRiskPercentage()
         static datetime lastDrawdownAlert = 0;
         if(TimeCurrent() - lastDrawdownAlert > 3600)
         {
-            PrintFormat("ð¡ï¸? DRAWDOWN DEFENSE: %.2f%% drawdown | Risk: %.2f%% â? %.2f%%", 
+            PrintFormat("Ã°ÂÂÂ¡Ã¯Â¸? DRAWDOWN DEFENSE: %.2f%% drawdown | Risk: %.2f%% Ã¢Â? %.2f%%", 
                        g_advCurrentDrawdown, RiskPercent, adjustedRisk);
             lastDrawdownAlert = TimeCurrent();
         }
@@ -459,7 +465,7 @@ double CalculateDynamicRiskPercentage()
         static datetime lastProfitAlert = 0;
         if(TimeCurrent() - lastProfitAlert > 3600)
         {
-            PrintFormat("ð PROFIT ACCELERATOR: +%.2f%% profit | Risk: %.2f%% â? %.2f%%", 
+            PrintFormat("Ã°ÂÂÂ PROFIT ACCELERATOR: +%.2f%% profit | Risk: %.2f%% Ã¢Â? %.2f%%", 
                        g_advCurrentProfit, RiskPercent, adjustedRisk);
             lastProfitAlert = TimeCurrent();
         }
@@ -484,11 +490,11 @@ string GetAdvancedRiskStatus()
     
     if(g_advCurrentDrawdown >= DrawdownThreshold && UseDrawdownDefense)
     {
-        status = StringFormat(" | ð¡ï¸? DEFENSE (%.1f%% DD)", g_advCurrentDrawdown);
+        status = StringFormat(" | Ã°ÂÂÂ¡Ã¯Â¸? DEFENSE (%.1f%% DD)", g_advCurrentDrawdown);
     }
     else if(g_advCurrentProfit >= ProfitThreshold && UseProfitAccelerator)
     {
-        status = StringFormat(" | ð ACCELERATOR (+%.1f%%)", g_advCurrentProfit);
+        status = StringFormat(" | Ã°ÂÂÂ ACCELERATOR (+%.1f%%)", g_advCurrentProfit);
     }
     
     return status;
@@ -797,19 +803,19 @@ void ManagePositions(const string symbol, const int index)
                 {
                     if(g_eaTrade.ResultRetcode() == TRADE_RETCODE_DONE)
                     {
-                        PrintFormat("â? %s: Position #%I64u closed manually at TP | Profit: $%.2f", 
+                        PrintFormat("Ã¢Â? %s: Position #%I64u closed manually at TP | Profit: $%.2f", 
                                    symbol, ticket, profit);
                     }
                     else
                     {
-                        PrintFormat("â ï¸ %s: TP close attempt for #%I64u - Retcode: %d (%s)", 
+                        PrintFormat("Ã¢ÂÂ Ã¯Â¸Â %s: TP close attempt for #%I64u - Retcode: %d (%s)", 
                                    symbol, ticket, g_eaTrade.ResultRetcode(), 
                                    g_eaTrade.ResultRetcodeDescription());
                     }
                 }
                 else
                 {
-                    PrintFormat("â? %s: Failed to close #%I64u at TP | Error: %d", 
+                    PrintFormat("Ã¢Â? %s: Failed to close #%I64u at TP | Error: %d", 
                                symbol, ticket, GetLastError());
                 }
                 
@@ -859,19 +865,19 @@ void ManagePositions(const string symbol, const int index)
                 {
                     if(g_eaTrade.ResultRetcode() == TRADE_RETCODE_DONE)
                     {
-                        PrintFormat("ð %s: Position #%I64u closed manually at SL | Loss: $%.2f", 
+                        PrintFormat("Ã°ÂÂÂ %s: Position #%I64u closed manually at SL | Loss: $%.2f", 
                                    symbol, ticket, profit);
                     }
                     else
                     {
-                        PrintFormat("â ï¸ %s: SL close attempt for #%I64u - Retcode: %d (%s)", 
+                        PrintFormat("Ã¢ÂÂ Ã¯Â¸Â %s: SL close attempt for #%I64u - Retcode: %d (%s)", 
                                    symbol, ticket, g_eaTrade.ResultRetcode(), 
                                    g_eaTrade.ResultRetcodeDescription());
                     }
                 }
                 else
                 {
-                    PrintFormat("â? %s: Failed to close #%I64u at SL | Error: %d", 
+                    PrintFormat("Ã¢Â? %s: Failed to close #%I64u at SL | Error: %d", 
                                symbol, ticket, GetLastError());
                 }
                 
@@ -1192,19 +1198,19 @@ void UpdateDashboard()
         
         if(g_advCurrentDrawdown >= DrawdownThreshold && UseDrawdownDefense)
         {
-            riskStateText = StringFormat("Risk: %.2f%% | ð¡ï¸? DEFENSE MODE (%.1f%% DD)", 
+            riskStateText = StringFormat("Risk: %.2f%% | Ã°ÂÂÂ¡Ã¯Â¸? DEFENSE MODE (%.1f%% DD)", 
                                        g_advAdjustedRisk, g_advCurrentDrawdown);
             riskColor = clrOrange;
         }
         else if(g_advCurrentProfit >= ProfitThreshold && UseProfitAccelerator)
         {
-            riskStateText = StringFormat("Risk: %.2f%% | ð ACCELERATOR (+%.1f%%)", 
+            riskStateText = StringFormat("Risk: %.2f%% | Ã°ÂÂÂ ACCELERATOR (+%.1f%%)", 
                                        g_advAdjustedRisk, g_advCurrentProfit);
             riskColor = clrLime;
         }
         else
         {
-            riskStateText = StringFormat("Risk: %.2f%% | âï¸ NORMAL MODE", g_advAdjustedRisk);
+            riskStateText = StringFormat("Risk: %.2f%% | Ã¢ÂÂÃ¯Â¸Â NORMAL MODE", g_advAdjustedRisk);
             riskColor = clrWhite;
         }
         
@@ -1827,7 +1833,7 @@ bool ExecuteBreakoutTrade(const string symbol, const int index)
     
     if(result && g_eaTrade.ResultRetcode() == TRADE_RETCODE_DONE)
     {
-        PrintFormat("�? %s %s OPENED | Lot:%.2f | Price:%.5f | SL:%.5f | TP:%.5f | ATR:%.5f",
+        PrintFormat("â? %s %s OPENED | Lot:%.2f | Price:%.5f | SL:%.5f | TP:%.5f | ATR:%.5f",
                    symbol, direction, lotSize, price, sl, tp, atr);
         
         g_stats[index].totalTrades++;
@@ -1835,11 +1841,12 @@ bool ExecuteBreakoutTrade(const string symbol, const int index)
     }
     else
     {
-        PrintFormat("�? %s: Trade failed | Retcode:%d | Error:%s", 
+        PrintFormat("â? %s: Trade failed | Retcode:%d | Error:%s", 
                    symbol, g_eaTrade.ResultRetcode(), g_eaTrade.ResultRetcodeDescription());
         return false;
     }
 }
 
 //+------------------------------------------------------------------+
+
 
