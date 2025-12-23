@@ -207,13 +207,17 @@ void InitializeTradingSymbols()
 } 
 
 //+------------------------------------------------------------------+
-//| Convert datetime to date-only string (YYYY.MM.DD)               |
+//| Convert Date String to Integer (YYYYMMDD format)                 |
 //+------------------------------------------------------------------+
-string DateToString(datetime dt)
+int DateStringToInt(const string dateStr)
 {
-    MqlDateTime mdt;
-    TimeToStruct(dt, mdt);
-    return StringFormat("%04d.%02d.%02d", mdt.year, mdt.mon, mdt.day);
+    // Input format: "YYYY.MM.DD" (e.g., "2025.01.15")
+    // Output: YYYYMMDD integer (e.g., 20250115)
+    
+    string temp = dateStr;
+    StringReplace(temp, ".", "");  // Remove dots: "20250115"
+    
+    return (int)StringToInteger(temp);
 }
 
 //+------------------------------------------------------------------+
@@ -226,24 +230,23 @@ string GetCurrentTradingDate(const string symbol)
 }
 
 //+------------------------------------------------------------------+
-//| Save Trade Lock using DATE STRING (No timestamp issues!)        |
+//| Save Trade Lock using DATE INTEGER (No timestamp issues!)        |
 //+------------------------------------------------------------------+
 void SaveTradeLockToGlobal(const string symbol, const string tradeDate)
 {
     string varName = StringFormat("BreakoutEA_%s_Date", symbol);
     
-    // Store the date as a simple number: YYYYMMDD (e.g., 20190102)
-    // This avoids ALL timezone and timestamp precision issues!
-    int dateInt = StringToInteger(StringReplace(tradeDate, ".", ""));
+    // Convert date string to integer: "2025.01.15" -> 20250115
+    int dateInt = DateStringToInt(tradeDate);
     
     if(GlobalVariableSet(varName, (double)dateInt))
     {
-        PrintFormat("? LOCK SAVED: %s = %s (Date: %d)", 
+        PrintFormat("🔒 LOCK SAVED: %s = %s (Date: %d)", 
                    varName, tradeDate, dateInt);
     }
     else
     {
-        PrintFormat("? ERROR: Failed to save lock for %s", symbol);
+        PrintFormat("❌ ERROR: Failed to save lock for %s", symbol);
     }
 }
 
@@ -262,12 +265,12 @@ bool IsSymbolLockedForDate(const string symbol, const string currentDate)
     
     // Get locked date as integer (YYYYMMDD format)
     int lockedDate = (int)GlobalVariableGet(varName);
-    int currentDateInt = StringToInteger(StringReplace(currentDate, ".", ""));
+    int currentDateInt = DateStringToInt(currentDate);
     
     if(lockedDate == currentDateInt)
     {
         // LOCKED for today
-        PrintFormat("? %s: LOCKED for date %s (lock: %d, current: %d)", 
+        PrintFormat("🚫 %s: LOCKED for date %s (lock: %d, current: %d)", 
                    symbol, currentDate, lockedDate, currentDateInt);
         return true;
     }
@@ -1994,6 +1997,7 @@ bool ExecuteBreakoutTrade(const string symbol, const int index)
     }
 }
 //+------------------------------------------------------------------+
+
 
 
 
