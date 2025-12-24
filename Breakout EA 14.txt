@@ -702,7 +702,7 @@ double GetATRValue(const int index)
 }
 
 //+------------------------------------------------------------------+
-//| FIX 1: Proper CheckTradeCooldown with State Reset                |
+//| CheckTradeCooldown - SIMPLIFIED (no breakoutProcessed check)     |
 //+------------------------------------------------------------------+
 bool CheckTradeCooldown(const string symbol, const int index)
 {
@@ -719,7 +719,7 @@ bool CheckTradeCooldown(const string symbol, const int index)
         // NEW D1 CANDLE - Reset everything
         if(g_symbolLastTradeTime[index] > 0)
         {
-            PrintFormat("? %s: NEW D1 CANDLE - Resetting all entry conditions", symbol);
+            PrintFormat("🔄 %s: NEW D1 CANDLE - Resetting all entry conditions", symbol);
         }
         
         // Reset cooldown
@@ -734,16 +734,7 @@ bool CheckTradeCooldown(const string symbol, const int index)
     }
     
     // ================================================================
-    // CHECK 2: Have we already processed a breakout on this D1?
-    // ================================================================
-    if(g_htfData[index].breakoutProcessed)
-    {
-        PrintFormat("? %s: Already processed breakout on this D1 candle", symbol);
-        return false;
-    }
-    
-    // ================================================================
-    // CHECK 3: Standard cooldown check
+    // CHECK 2: Standard cooldown check
     // ================================================================
     if(g_symbolLastTradeTime[index] == 0)
     {
@@ -763,21 +754,18 @@ bool CheckTradeCooldown(const string symbol, const int index)
         static datetime lastLog[SYMBOL_COUNT];
         if(now - lastLog[index] > 600)
         {
-            PrintFormat("? %s: COOLDOWN - %dh %dm remaining (Next: %s)", 
-                       symbol, remainingHours, remainingMinutes,
-                       TimeToString(nextTradeTime, TIME_DATE|TIME_MINUTES));
+            PrintFormat("⏳ %s: COOLDOWN - %dh %dm remaining", 
+                       symbol, remainingHours, remainingMinutes);
             lastLog[index] = now;
         }
         
         return false;
     }
     
-    // Cooldown expired but still on same D1 - this shouldn't happen normally
-    // but if it does, allow trading again
-    PrintFormat("? %s: Cooldown expired on same D1 - allowing trade", symbol);
+    // Cooldown expired but still on same D1
+    PrintFormat("✅ %s: Cooldown expired on same D1 - allowing trade", symbol);
     return true;
 }
-
 
 //+------------------------------------------------------------------+
 //| Calculate Lot Size with Enhanced Risk Management                |
@@ -1513,7 +1501,7 @@ int CountBreakoutPositions(const string symbol)
 }
 
 //+------------------------------------------------------------------+
-//| FIX 7: ProcessSymbol - Clean flow                                |
+//| ProcessSymbol - FIXED with early breakoutProcessed check         |
 //+------------------------------------------------------------------+
 void ProcessSymbol(const string symbol, const int index)
 {
@@ -1527,6 +1515,20 @@ void ProcessSymbol(const string symbol, const int index)
     // FILTER 2: Manage existing positions
     // ================================================================
     ManagePositions(symbol, index);
+    
+    // ================================================================
+    // CRITICAL FIX: Check if breakout already processed BEFORE cooldown
+    // ================================================================
+    if(g_htfData[index].breakoutProcessed)
+    {
+        static datetime lastLog[SYMBOL_COUNT];
+        if(TimeCurrent() - lastLog[index] > 3600)  // Log hourly
+        {
+            PrintFormat("⏸️ %s: Breakout already processed - waiting for new D1", symbol);
+            lastLog[index] = TimeCurrent();
+        }
+        return;  // Exit immediately - don't check anything else
+    }
     
     // ================================================================
     // FILTER 3: Check cooldown (includes D1 reset logic)
@@ -1606,7 +1608,7 @@ void CheckNewHTFCandle(const string symbol, const int index)
 }
 
 //+------------------------------------------------------------------+
-//| FIX 4: MarkPreviousHTF - Proper D1 reset                         |
+//| MarkPreviousHTF - Ensure proper reset on new D1                  |
 //+------------------------------------------------------------------+
 bool MarkPreviousHTF(const string symbol, const int index)
 {
@@ -1619,28 +1621,32 @@ bool MarkPreviousHTF(const string symbol, const int index)
        CopyLow(symbol, PERIOD_D1, 1, 1, low) <= 0 ||
        CopyTime(symbol, PERIOD_D1, 0, 1, time) <= 0)
     {
+        PrintFormat("❌ %s: Failed to copy D1 data", symbol);
         return false;
     }
     
     datetime newD1Time = time[0];
+    datetime oldD1Time = g_htfData[index].time;
     
     // ================================================================
-    // CRITICAL: If D1 time changed, this is a NEW candle
+    // CRITICAL: Detect new D1 and reset ALL flags
     // ================================================================
-    bool isNewD1 = (g_htfData[index].time != newD1Time);
+    bool isNewD1 = (oldD1Time != newD1Time);
     
-    if(isNewD1 && g_htfData[index].time > 0)  // Not first initialization
+    if(isNewD1 && oldD1Time > 0)  // Not initialization
     {
-        PrintFormat("? %s: NEW D1 CANDLE - Full Reset", symbol);
-        PrintFormat("  Previous D1: %s", TimeToString(g_htfData[index].time, TIME_DATE));
-        PrintFormat("  Current D1: %s", TimeToString(newD1Time, TIME_DATE));
+        PrintFormat("📅 %s: NEW D1 CANDLE CONFIRMED", symbol);
+        PrintFormat("  Previous: %s", TimeToString(oldD1Time, TIME_DATE));
+        PrintFormat("  Current:  %s", TimeToString(newD1Time, TIME_DATE));
         
-        // Reset ALL trading state for new day
+        // ✅ EXPLICIT RESET - ALL FLAGS
         g_symbolLastTradeTime[index] = 0;
         g_htfData[index].breakoutUp = false;
         g_htfData[index].breakoutDown = false;
-        g_htfData[index].breakoutProcessed = false;
+        g_htfData[index].breakoutProcessed = false;  // CRITICAL!
         g_htfData[index].breakLevel = 0;
+        
+        PrintFormat("✅ %s: ALL FLAGS RESET - Ready for new day", symbol);
     }
     
     // Update HTF data
@@ -1650,13 +1656,12 @@ bool MarkPreviousHTF(const string symbol, const int index)
     g_htfData[index].low = low[0];
     g_htfData[index].time = newD1Time;
     
-    // Draw levels if on current chart
     if(symbol == _Symbol)
     {
         DrawHTFLevels(symbol, index);
     }
     
-    PrintFormat("? %s D1 Levels: H:%.5f L:%.5f", symbol, g_htfData[index].high, g_htfData[index].low);
+    PrintFormat("📊 %s D1: H:%.5f L:%.5f", symbol, g_htfData[index].high, g_htfData[index].low);
     
     return true;
 }
@@ -1693,15 +1698,11 @@ void DrawHTFLevels(const string symbol, const int index)
 }
 
 
-//+------------------------------------------------------------------+
-//| FIX 2: CheckBreakout - Only detect, don't set processed flag     |
+///+------------------------------------------------------------------+
+//| CheckBreakout - SIMPLIFIED (no breakoutProcessed check here)     |
 //+------------------------------------------------------------------+
 bool CheckBreakout(const string symbol, const int index, ENUM_ORDER_TYPE &orderType, double &breakLevel)
 {
-    // ================================================================
-    // IMPORTANT: Only DETECT breakout, don't mark as processed yet
-    // ================================================================
-    
     // Reset temporary flags (check fresh each time)
     bool tempBreakoutUp = false;
     bool tempBreakoutDown = false;
@@ -1728,7 +1729,7 @@ bool CheckBreakout(const string symbol, const int index, ENUM_ORDER_TYPE &orderT
         orderType = ORDER_TYPE_BUY;
         breakLevel = g_htfData[index].high;
         
-        PrintFormat("? %s: BREAKOUT UP DETECTED | D1: %.5f > High: %.5f", 
+        PrintFormat("🚀 %s: BREAKOUT UP | D1: %.5f > High: %.5f", 
                    symbol, currentPriceD1, g_htfData[index].high);
     }
     // Check BREAKOUT DOWN
@@ -1739,7 +1740,7 @@ bool CheckBreakout(const string symbol, const int index, ENUM_ORDER_TYPE &orderT
         orderType = ORDER_TYPE_SELL;
         breakLevel = g_htfData[index].low;
         
-        PrintFormat("? %s: BREAKOUT DOWN DETECTED | D1: %.5f < Low: %.5f", 
+        PrintFormat("📉 %s: BREAKOUT DOWN | D1: %.5f < Low: %.5f", 
                    symbol, currentPriceD1, g_htfData[index].low);
     }
     
@@ -1784,7 +1785,7 @@ bool CheckEntryConfirmation(const string symbol, const int index, const ENUM_ORD
 }
 
 //+------------------------------------------------------------------+
-//| FIX 3: ExecuteTrade - Mark breakout as processed                 |
+//| ExecuteTrade - Keep the breakoutProcessed flag setting           |
 //+------------------------------------------------------------------+
 bool ExecuteTrade(const string symbol, const int index, const ENUM_ORDER_TYPE orderType, const double breakLevel)
 {
@@ -1794,20 +1795,11 @@ bool ExecuteTrade(const string symbol, const int index, const ENUM_ORDER_TYPE or
     g_eaSymbolInfo.RefreshRates();
     
     // ================================================================
-    // SAFETY: Final cooldown check
-    // ================================================================
-    if(!CheckTradeCooldown(symbol, index))
-    {
-        PrintFormat("? %s: Cooldown check failed in ExecuteTrade", symbol);
-        return false;
-    }
-    
-    // ================================================================
-    // SAFETY: Check if breakout already processed
+    // SAFETY: Double-check breakout not already processed
     // ================================================================
     if(g_htfData[index].breakoutProcessed)
     {
-        PrintFormat("? %s: Breakout already processed", symbol);
+        PrintFormat("⛔ %s: Breakout already processed (safety check)", symbol);
         return false;
     }
     
@@ -1852,7 +1844,7 @@ bool ExecuteTrade(const string symbol, const int index, const ENUM_ORDER_TYPE or
     if(result && g_eaTrade.ResultRetcode() == TRADE_RETCODE_DONE)
     {
         // ================================================================
-        // CRITICAL: Mark breakout as processed (prevents duplicate trades)
+        // CRITICAL: Mark breakout as processed IMMEDIATELY
         // ================================================================
         g_htfData[index].breakoutProcessed = true;
         g_symbolLastTradeTime[index] = TimeCurrent();
@@ -1864,13 +1856,13 @@ bool ExecuteTrade(const string symbol, const int index, const ENUM_ORDER_TYPE or
         double riskPips = MathAbs(price - sl) / g_eaSymbolInfo.Point() / 10;
         double rewardPips = MathAbs(tp - price) / g_eaSymbolInfo.Point() / 10;
         
-        PrintFormat("? TRADE EXECUTED & LOCKED");
+        PrintFormat("✅ TRADE EXECUTED & LOCKED");
         PrintFormat("  %s %s | Lot: %.2f | Entry: %.5f", symbol, direction, lotSize, price);
         PrintFormat("  SL: %.5f | TP: %.5f", sl, tp);
         PrintFormat("  Risk: %.1f pips | Reward: %.1f pips", riskPips, rewardPips);
         PrintFormat("  Comment: %s", tradeComment);
-        PrintFormat("  ? Breakout processed - No more trades this D1");
-        PrintFormat("  ? Next trade window: %s", TimeToString(nextTradeTime, TIME_DATE|TIME_MINUTES));
+        PrintFormat("  🔒 LOCKED - No more trades until %s", 
+                   TimeToString(nextTradeTime, TIME_DATE|TIME_MINUTES));
         
         g_stats[index].totalTrades++;
         g_stats[index].lastTradeTime = TimeCurrent();
@@ -1879,9 +1871,9 @@ bool ExecuteTrade(const string symbol, const int index, const ENUM_ORDER_TYPE or
     }
     
     // Trade failed - don't mark as processed
-    PrintFormat("? TRADE FAILED: %s | Retcode: %d (%s)", 
+    PrintFormat("❌ TRADE FAILED: %s | Retcode: %d (%s)", 
                symbol, g_eaTrade.ResultRetcode(), g_eaTrade.ResultRetcodeDescription());
     return false;
 }
-//+------------------------------------------------------------------+
 
+//+------------------------------------------------------------------+
