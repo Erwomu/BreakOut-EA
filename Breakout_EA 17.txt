@@ -1360,57 +1360,95 @@ int CountBreakoutPositions(const string symbol)
 }
 
 //+------------------------------------------------------------------+
-//| Main Processing                                                   |
+//| Main Processing - FIXED: Lock ONLY after successful trade        |
+//| WITH: Concurrent execution prevention                            |
 //+------------------------------------------------------------------+
 void ProcessSymbol(const string symbol, const int index)
 {
+    // 1. CHECK LOCK FIRST - if locked, exit immediately
     if(!g_symbolLocks[index].CanTrade())
     {
         return;
     }
     
-    if(UseSessionFilter && !IsInTradingSession())
-        return;
+    // 2. SET PROCESSING FLAG - prevents concurrent trade attempts
+    g_symbolLocks[index].SetProcessing(true);
     
+    // 3. Check session filter
+    if(UseSessionFilter && !IsInTradingSession())
+    {
+        g_symbolLocks[index].SetProcessing(false);
+        return;
+    }
+    
+    // 4. Manage existing positions (trailing stop, etc.)
     ManagePositions(symbol, index);
     
+    // 5. Check position limits
     int currentPositions = CountBreakoutPositions(symbol);
     if(currentPositions >= MaxOpenPositions)
+    {
+        g_symbolLocks[index].SetProcessing(false);
         return;
+    }
     
     int totalPositions = GetAllPositionsCount();
     if(totalPositions >= MaxTotalPositions)
+    {
+        g_symbolLocks[index].SetProcessing(false);
         return;
+    }
     
+    // 6. Check for breakout
     ENUM_ORDER_TYPE orderType;
     double breakLevel;
     
     if(!CheckBreakout(symbol, index, orderType, breakLevel))
     {
+        g_symbolLocks[index].SetProcessing(false);
         return;
     }
     
-    g_symbolLocks[index].Lock();
-    
-    PrintFormat("🎯 %s: Breakout detected on %s", 
+    // BREAKOUT DETECTED - but DON'T lock yet!
+    PrintFormat("🎯 %s: Breakout detected on %s - checking filters...", 
                symbol, 
                TimeToString(iTime(symbol, PERIOD_D1, 0), TIME_DATE));
     
     g_htfData[index].breakLevel = breakLevel;
     
+    // 7. Check entry confirmation (rejection pattern)
     if(!CheckEntryConfirmation(symbol, index, orderType))
     {
-        return;
+        PrintFormat("⏳ %s: Breakout detected but waiting for entry confirmation", symbol);
+        g_symbolLocks[index].SetProcessing(false);
+        return; // NO LOCK - just wait for confirmation
     }
     
+    // 8. Check spread filter
     if(UseSpreadFilter && !IsSpreadAcceptable(symbol))
     {
-        return;
+        PrintFormat("❌ %s: Breakout + confirmation OK, but spread too high", symbol);
+        g_symbolLocks[index].SetProcessing(false);
+        return; // NO LOCK - spread might improve
     }
     
-    ExecuteTrade(symbol, index, orderType, breakLevel);
+    // 9. ALL FILTERS PASSED - Try to execute trade
+    PrintFormat("✅ %s: All filters passed - executing trade...", symbol);
+    
+    bool tradeExecuted = ExecuteTrade(symbol, index, orderType, breakLevel);
+    
+    // 10. LOCK (regardless of success/failure to prevent repeated attempts)
+    g_symbolLocks[index].Lock();
+    
+    if(tradeExecuted)
+    {
+        PrintFormat("🔒 %s: Trade executed successfully - symbol LOCKED for today", symbol);
+    }
+    else
+    {
+        PrintFormat("⚠️ %s: Trade execution failed - symbol LOCKED to prevent repeated attempts", symbol);
+    }
 }
-
 //+------------------------------------------------------------------+
 //| Check New HTF Candle                                              |
 //+------------------------------------------------------------------+
@@ -1594,7 +1632,7 @@ bool CheckEntryConfirmation(const string symbol, const int index, const ENUM_ORD
 }
 
 //+------------------------------------------------------------------+
-//| Execute Trade - Lock already set before calling this             |
+//| Execute Trade - Returns TRUE only if trade succeeds              |
 //+------------------------------------------------------------------+
 bool ExecuteTrade(const string symbol, const int index, const ENUM_ORDER_TYPE orderType, const double breakLevel)
 {
@@ -1666,16 +1704,13 @@ bool ExecuteTrade(const string symbol, const int index, const ENUM_ORDER_TYPE or
         PrintFormat("│     Take Profit: %.5f (%.1f pips)", tp, rewardPips);
         PrintFormat("│     Risk/Reward: 1:%.1f", rewardPips/riskPips);
         PrintFormat("│     Comment: %s", tradeComment);
-        PrintFormat("│");
-        PrintFormat("│     🔒 Symbol locked until next D1 candle");
-        PrintFormat("│     💾 Lock saved to GlobalVariable storage");
         Print("└────────────────────────────────────────┘");
         
         // Update statistics
         g_stats[index].totalTrades++;
         g_stats[index].lastTradeTime = TimeCurrent();
         
-        return true;
+        return true; // SUCCESS - will trigger lock
     }
     else
     {
@@ -1683,11 +1718,7 @@ bool ExecuteTrade(const string symbol, const int index, const ENUM_ORDER_TYPE or
         PrintFormat("   Retcode: %d (%s)", 
                    g_eaTrade.ResultRetcode(), 
                    g_eaTrade.ResultRetcodeDescription());
-        PrintFormat("   Note: Symbol stays LOCKED (breakout already detected)");
         
-        // Even though trade failed, symbol remains locked
-        // This prevents repeated attempts on the same breakout
-        return false;
+        return false; // FAILED - but will still trigger lock to prevent repeated attempts
     }
 }
-
