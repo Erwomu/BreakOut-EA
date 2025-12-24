@@ -179,7 +179,8 @@ double g_advCurrentDrawdown = 0;
 double g_advCurrentProfit = 0;
 double g_advAdjustedRisk = 0;
 
-// NOTE: Removed g_symbolLastTradeTime[] - using actual trade history instead
+// Global trade timestamp tracking (CRITICAL for preventing duplicates)
+datetime g_symbolLastOrderTime[SYMBOL_COUNT];
 
 //+------------------------------------------------------------------+
 //| Initialize Trading Symbols                                       |
@@ -548,7 +549,13 @@ int OnInit()
         {
             Print("WARNING: Failed to create dashboard");
         }
-    }
+    } 
+
+// Initialize last order times
+for(int i = 0; i < SYMBOL_COUNT; i++)
+{
+    g_symbolLastOrderTime[i] = 0;
+}
     
     EventSetTimer(60);
     
@@ -1437,7 +1444,7 @@ int CountBreakoutPositions(const string symbol)
     return count;
 }
 
-///+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
 //| SIMPLIFIED ProcessSymbol - No more complex flag management       |
 //+------------------------------------------------------------------+
 void ProcessSymbol(const string symbol, const int index)
@@ -1704,6 +1711,8 @@ bool CheckEntryConfirmation(const string symbol, const int index, const ENUM_ORD
 //+------------------------------------------------------------------+
 //| SIMPLIFIED ExecuteTrade - No flag management needed              |
 //+------------------------------------------------------------------+
+//| SIMPLIFIED ExecuteTrade - No flag management needed              |
+//+------------------------------------------------------------------+
 bool ExecuteTrade(const string symbol, const int index, const ENUM_ORDER_TYPE orderType, const double breakLevel)
 {
     if(!g_eaSymbolInfo.Name(symbol))
@@ -1712,11 +1721,25 @@ bool ExecuteTrade(const string symbol, const int index, const ENUM_ORDER_TYPE or
     g_eaSymbolInfo.RefreshRates();
     
     // ================================================================
-    // FINAL SAFETY CHECK: One last verification
+    // SAFETY CHECK 1: Already traded today?
     // ================================================================
     if(HasTradedToday(symbol, index))
     {
         PrintFormat("⛔ %s: Trade blocked - already traded today (safety check)", symbol);
+        return false;
+    }
+    
+    // ================================================================
+    // SAFETY CHECK 2: Check if we JUST placed an order (within 5 seconds)
+    // This prevents duplicate orders during the same OnTick() cycle
+    // ================================================================
+    static datetime g_lastOrderTime[SYMBOL_COUNT];
+    datetime now = TimeCurrent();
+    
+    if(now - g_lastOrderTime[index] < 5)
+    {
+        PrintFormat("⛔ %s: Trade blocked - order placed %d seconds ago", 
+                   symbol, (int)(now - g_lastOrderTime[index]));
         return false;
     }
     
@@ -1760,6 +1783,9 @@ bool ExecuteTrade(const string symbol, const int index, const ENUM_ORDER_TYPE or
     
     if(result && g_eaTrade.ResultRetcode() == TRADE_RETCODE_DONE)
     {
+        // Mark this order time to prevent duplicates
+        g_lastOrderTime[index] = now;
+        
         double riskPips = MathAbs(price - sl) / g_eaSymbolInfo.Point() / 10;
         double rewardPips = MathAbs(tp - price) / g_eaSymbolInfo.Point() / 10;
         
@@ -1783,4 +1809,5 @@ bool ExecuteTrade(const string symbol, const int index, const ENUM_ORDER_TYPE or
     return false;
 }
 //+------------------------------------------------------------------+
+
 
