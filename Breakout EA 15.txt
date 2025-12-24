@@ -1811,3 +1811,4 @@ bool ExecuteTrade(const string symbol, const int index, const ENUM_ORDER_TYPE or
 //+------------------------------------------------------------------+
 
 
+
