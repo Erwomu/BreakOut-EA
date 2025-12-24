@@ -391,7 +391,7 @@ double CalculateDynamicRiskPercentage()
         static datetime lastDrawdownAlert = 0;
         if(TimeCurrent() - lastDrawdownAlert > 3600)
         {
-            PrintFormat("?? DRAWDOWN DEFENSE: %.2f%% DD | Risk: %.2f%% �� %.2f%%", 
+            PrintFormat("?? DRAWDOWN DEFENSE: %.2f%% DD | Risk: %.2f%% ¡ú %.2f%%", 
                        g_advCurrentDrawdown, RiskPercent, adjustedRisk);
             lastDrawdownAlert = TimeCurrent();
         }
@@ -403,7 +403,7 @@ double CalculateDynamicRiskPercentage()
         static datetime lastProfitAlert = 0;
         if(TimeCurrent() - lastProfitAlert > 3600)
         {
-            PrintFormat("? PROFIT ACCELERATOR: +%.2f%% | Risk: %.2f%% �� %.2f%%", 
+            PrintFormat("? PROFIT ACCELERATOR: +%.2f%% | Risk: %.2f%% ¡ú %.2f%%", 
                        g_advCurrentProfit, RiskPercent, adjustedRisk);
             lastProfitAlert = TimeCurrent();
         }
@@ -627,13 +627,23 @@ double GetATRValue(const int index)
 }
 
 //+------------------------------------------------------------------+
-//| Check if already traded today - FOOLPROOF METHOD                 |
+//| Check if already traded today - ULTRA-DEFENSIVE VERSION          |
 //+------------------------------------------------------------------+
 bool HasTradedToday(const string symbol, const int index)
 {
     datetime currentD1Start = iTime(symbol, PERIOD_D1, 0);
+    datetime currentD1End = currentD1Start + PeriodSeconds(PERIOD_D1);
     
-    // Check OPEN positions opened today
+    PrintFormat("🔍 %s: Checking trades for D1 [%s - %s]", 
+               symbol, 
+               TimeToString(currentD1Start, TIME_DATE|TIME_MINUTES),
+               TimeToString(currentD1End, TIME_DATE|TIME_MINUTES));
+    
+    int tradeCount = 0;
+    
+    // ================================================================
+    // CHECK 1: Open positions from this D1
+    // ================================================================
     for(int i = 0; i < PositionsTotal(); i++)
     {
         if(!g_eaPosition.SelectByIndex(i))
@@ -644,54 +654,75 @@ bool HasTradedToday(const string symbol, const int index)
         
         datetime posOpenTime = (datetime)g_eaPosition.Time();
         
-        if(posOpenTime >= currentD1Start)
+        if(posOpenTime >= currentD1Start && posOpenTime < currentD1End)
         {
-            static datetime lastLog[SYMBOL_COUNT];
-            if(TimeCurrent() - lastLog[index] > 600)
-            {
-                PrintFormat("? %s: Open position from today exists (opened %s)", 
-                           symbol, TimeToString(posOpenTime, TIME_MINUTES));
-                lastLog[index] = TimeCurrent();
-            }
-            return true;
+            tradeCount++;
+            PrintFormat("  ✅ Found OPEN position #%I64u opened at %s", 
+                       g_eaPosition.Ticket(),
+                       TimeToString(posOpenTime, TIME_DATE|TIME_MINUTES));
         }
     }
     
-    // Check CLOSED positions from today
-    if(HistorySelect(currentD1Start, TimeCurrent()))
+    // ================================================================
+    // CHECK 2: Closed positions from this D1
+    // ================================================================
+    // CRITICAL: Select wider range to ensure we don't miss anything
+    datetime historyStart = currentD1Start - 3600; // 1 hour before D1 start
+    datetime historyEnd = TimeCurrent() + 3600;    // 1 hour in future
+    
+    if(!HistorySelect(historyStart, historyEnd))
     {
-        for(int i = HistoryDealsTotal() - 1; i >= 0; i--)
+        PrintFormat("  ⚠️ History selection failed for %s", symbol);
+        return (tradeCount > 0);
+    }
+    
+    int totalDeals = HistoryDealsTotal();
+    PrintFormat("  📊 Checking %d history deals...", totalDeals);
+    
+    for(int i = 0; i < totalDeals; i++)
+    {
+        ulong ticket = HistoryDealGetTicket(i);
+        if(ticket == 0)
+            continue;
+        
+        // Check symbol
+        string dealSymbol = HistoryDealGetString(ticket, DEAL_SYMBOL);
+        if(dealSymbol != symbol)
+            continue;
+        
+        // Check magic
+        long dealMagic = HistoryDealGetInteger(ticket, DEAL_MAGIC);
+        if(dealMagic != MagicNumber)
+            continue;
+        
+        // Check if ENTRY deal
+        long dealEntry = HistoryDealGetInteger(ticket, DEAL_ENTRY);
+        if(dealEntry != DEAL_ENTRY_IN)
+            continue;
+        
+        // Check time
+        datetime dealTime = (datetime)HistoryDealGetInteger(ticket, DEAL_TIME);
+        
+        if(dealTime >= currentD1Start && dealTime < currentD1End)
         {
-            ulong ticket = HistoryDealGetTicket(i);
-            if(ticket == 0)
-                continue;
-            
-            if(HistoryDealGetString(ticket, DEAL_SYMBOL) != symbol)
-                continue;
-            
-            if(HistoryDealGetInteger(ticket, DEAL_MAGIC) != MagicNumber)
-                continue;
-            
-            if(HistoryDealGetInteger(ticket, DEAL_ENTRY) == DEAL_ENTRY_IN)
-            {
-                datetime dealTime = (datetime)HistoryDealGetInteger(ticket, DEAL_TIME);
-                
-                if(dealTime >= currentD1Start)
-                {
-                    static datetime lastLog[SYMBOL_COUNT];
-                    if(TimeCurrent() - lastLog[index] > 600)
-                    {
-                        PrintFormat("? %s: Already traded today (closed at %s)", 
-                                   symbol, TimeToString(dealTime, TIME_MINUTES));
-                        lastLog[index] = TimeCurrent();
-                    }
-                    return true;
-                }
-            }
+            tradeCount++;
+            PrintFormat("  ✅ Found CLOSED deal #%I64u at %s", 
+                       ticket,
+                       TimeToString(dealTime, TIME_DATE|TIME_MINUTES));
         }
     }
     
-    return false;  // No trades today
+    // ================================================================
+    // RESULT
+    // ================================================================
+    if(tradeCount > 0)
+    {
+        PrintFormat("🔒 %s: BLOCKED - %d trade(s) found today", symbol, tradeCount);
+        return true;
+    }
+    
+    PrintFormat("✅ %s: OK - No trades today, can proceed", symbol);
+    return false;
 }
 
 //+------------------------------------------------------------------+
@@ -805,19 +836,19 @@ void ManagePositions(const string symbol, const int index)
                 {
                     if(g_eaTrade.ResultRetcode() == TRADE_RETCODE_DONE)
                     {
-                        PrintFormat("ÃÂ¢ÃÂ? %s: Position #%I64u closed manually at TP | Profit: $%.2f", 
+                        PrintFormat("ÃÂÃÂ¢ÃÂÃÂ? %s: Position #%I64u closed manually at TP | Profit: $%.2f", 
                                    symbol, ticket, profit);
                     }
                     else
                     {
-                        PrintFormat("ÃÂ¢ÃÂÃÂ ÃÂ¯ÃÂ¸ÃÂ %s: TP close attempt for #%I64u - Retcode: %d (%s)", 
+                        PrintFormat("ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ ÃÂÃÂ¯ÃÂÃÂ¸ÃÂÃÂ %s: TP close attempt for #%I64u - Retcode: %d (%s)", 
                                    symbol, ticket, g_eaTrade.ResultRetcode(), 
                                    g_eaTrade.ResultRetcodeDescription());
                     }
                 }
                 else
                 {
-                    PrintFormat("ÃÂ¢ÃÂ? %s: Failed to close #%I64u at TP | Error: %d", 
+                    PrintFormat("ÃÂÃÂ¢ÃÂÃÂ? %s: Failed to close #%I64u at TP | Error: %d", 
                                symbol, ticket, GetLastError());
                 }
                 
@@ -867,19 +898,19 @@ void ManagePositions(const string symbol, const int index)
                 {
                     if(g_eaTrade.ResultRetcode() == TRADE_RETCODE_DONE)
                     {
-                        PrintFormat("ÃÂ°ÃÂÃÂÃÂ %s: Position #%I64u closed manually at SL | Loss: $%.2f", 
+                        PrintFormat("ÃÂÃÂ°ÃÂÃÂÃÂÃÂÃÂÃÂ %s: Position #%I64u closed manually at SL | Loss: $%.2f", 
                                    symbol, ticket, profit);
                     }
                     else
                     {
-                        PrintFormat("ÃÂ¢ÃÂÃÂ ÃÂ¯ÃÂ¸ÃÂ %s: SL close attempt for #%I64u - Retcode: %d (%s)", 
+                        PrintFormat("ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ ÃÂÃÂ¯ÃÂÃÂ¸ÃÂÃÂ %s: SL close attempt for #%I64u - Retcode: %d (%s)", 
                                    symbol, ticket, g_eaTrade.ResultRetcode(), 
                                    g_eaTrade.ResultRetcodeDescription());
                     }
                 }
                 else
                 {
-                    PrintFormat("ÃÂ¢ÃÂ? %s: Failed to close #%I64u at SL | Error: %d", 
+                    PrintFormat("ÃÂÃÂ¢ÃÂÃÂ? %s: Failed to close #%I64u at SL | Error: %d", 
                                symbol, ticket, GetLastError());
                 }
                 
@@ -1200,19 +1231,19 @@ void UpdateDashboard()
         
         if(g_advCurrentDrawdown >= DrawdownThreshold && UseDrawdownDefense)
         {
-            riskStateText = StringFormat("Risk: %.2f%% | ?? DEFENSE (%.1f%% DD)", 
+            riskStateText = StringFormat("Risk: %.2f%% | 🛡️ DEFENSE (%.1f%% DD)", 
                                        g_advAdjustedRisk, g_advCurrentDrawdown);
             riskColor = clrOrange;
         }
         else if(g_advCurrentProfit >= ProfitThreshold && UseProfitAccelerator)
         {
-            riskStateText = StringFormat("Risk: %.2f%% | ? ACCELERATOR (+%.1f%%)", 
+            riskStateText = StringFormat("Risk: %.2f%% | 🚀 ACCELERATOR (+%.1f%%)", 
                                        g_advAdjustedRisk, g_advCurrentProfit);
             riskColor = clrLime;
         }
         else
         {
-            riskStateText = StringFormat("Risk: %.2f%% | ?? NORMAL", g_advAdjustedRisk);
+            riskStateText = StringFormat("Risk: %.2f%% | ⚖️ NORMAL", g_advAdjustedRisk);
             riskColor = clrWhite;
         }
         
@@ -1406,22 +1437,35 @@ int CountBreakoutPositions(const string symbol)
     return count;
 }
 
-//+------------------------------------------------------------------+
+///+------------------------------------------------------------------+
 //| SIMPLIFIED ProcessSymbol - No more complex flag management       |
 //+------------------------------------------------------------------+
 void ProcessSymbol(const string symbol, const int index)
 {
+    Print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    PrintFormat("🔄 PROCESSING: %s at %s", symbol, TimeToString(TimeCurrent(), TIME_DATE|TIME_MINUTES));
+    
     // ================================================================
     // GUARD #1: Already traded today? STOP IMMEDIATELY
     // ================================================================
     if(HasTradedToday(symbol, index))
+    {
+        PrintFormat("⛔ %s: BLOCKED by HasTradedToday()", symbol);
+        Print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         return;
+    }
+    
+    PrintFormat("✅ %s: Passed HasTradedToday() check", symbol);
     
     // ================================================================
     // FILTER 1: Session filter
     // ================================================================
     if(UseSessionFilter && !IsInTradingSession())
+    {
+        PrintFormat("⏰ %s: Outside trading session", symbol);
+        Print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         return;
+    }
     
     // ================================================================
     // FILTER 2: Manage existing positions
@@ -1519,7 +1563,7 @@ bool MarkPreviousHTF(const string symbol, const int index)
     // Log if D1 changed
     if(g_htfData[index].time > 0 && g_htfData[index].time != newD1Time)
     {
-        PrintFormat("? %s: NEW D1 CANDLE", symbol);
+        PrintFormat("📅 %s: NEW D1 CANDLE", symbol);
         PrintFormat("   Previous: %s", TimeToString(g_htfData[index].time, TIME_DATE));
         PrintFormat("   Current:  %s", TimeToString(newD1Time, TIME_DATE));
     }
@@ -1602,7 +1646,7 @@ bool CheckBreakout(const string symbol, const int index, ENUM_ORDER_TYPE &orderT
         orderType = ORDER_TYPE_BUY;
         breakLevel = g_htfData[index].high;
         
-        PrintFormat("🚀 %s: BREAKOUT UP | D1: %.5f > High: %.5f", 
+        PrintFormat("ð %s: BREAKOUT UP | D1: %.5f > High: %.5f", 
                    symbol, currentPriceD1, g_htfData[index].high);
     }
     // Check BREAKOUT DOWN
@@ -1613,7 +1657,7 @@ bool CheckBreakout(const string symbol, const int index, ENUM_ORDER_TYPE &orderT
         orderType = ORDER_TYPE_SELL;
         breakLevel = g_htfData[index].low;
         
-        PrintFormat("📉 %s: BREAKOUT DOWN | D1: %.5f < Low: %.5f", 
+        PrintFormat("ð %s: BREAKOUT DOWN | D1: %.5f < Low: %.5f", 
                    symbol, currentPriceD1, g_htfData[index].low);
     }
     
@@ -1672,7 +1716,7 @@ bool ExecuteTrade(const string symbol, const int index, const ENUM_ORDER_TYPE or
     // ================================================================
     if(HasTradedToday(symbol, index))
     {
-        PrintFormat("? %s: Trade blocked - already traded today (safety check)", symbol);
+        PrintFormat("⛔ %s: Trade blocked - already traded today (safety check)", symbol);
         return false;
     }
     
@@ -1720,12 +1764,12 @@ bool ExecuteTrade(const string symbol, const int index, const ENUM_ORDER_TYPE or
         double rewardPips = MathAbs(tp - price) / g_eaSymbolInfo.Point() / 10;
         
         Print("========================================");
-        PrintFormat("? TRADE EXECUTED: %s %s", symbol, direction);
+        PrintFormat("✅ TRADE EXECUTED: %s %s", symbol, direction);
         PrintFormat("   Lot: %.2f | Entry: %.5f", lotSize, price);
         PrintFormat("   SL: %.5f (%.1f pips)", sl, riskPips);
         PrintFormat("   TP: %.5f (%.1f pips)", tp, rewardPips);
         PrintFormat("   Comment: %s", tradeComment);
-        PrintFormat("   ? No more trades for %s today", symbol);
+        PrintFormat("   🔒 No more trades for %s today", symbol);
         Print("========================================");
         
         g_stats[index].totalTrades++;
@@ -1734,9 +1778,9 @@ bool ExecuteTrade(const string symbol, const int index, const ENUM_ORDER_TYPE or
         return true;
     }
     
-    PrintFormat("? TRADE FAILED: %s | Retcode: %d (%s)", 
+    PrintFormat("❌ TRADE FAILED: %s | Retcode: %d (%s)", 
                symbol, g_eaTrade.ResultRetcode(), g_eaTrade.ResultRetcodeDescription());
     return false;
 }
-
 //+------------------------------------------------------------------+
+
