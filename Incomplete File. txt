@@ -1,0 +1,598 @@
+//+------------------------------------------------------------------+
+//|                                          BreakoutEA_v2.13_FIXED  |
+//|                                  ONE TRADE PER DAY - BULLETPROOF |
+//+------------------------------------------------------------------+
+#property copyright "Copyright 2025, Your Name"
+#property link      "https://www.mql5.com"
+#property version   "2.13"
+#property strict
+
+#include <Trade\Trade.mqh>
+#include <Trade\SymbolInfo.mqh>
+#include <Trade\PositionInfo.mqh>
+#include <Trade\AccountInfo.mqh>
+
+//+------------------------------------------------------------------+
+//| Persistent Lock Structure with GlobalVariable Storage             |
+//+------------------------------------------------------------------+
+struct PersistentBreakoutLock
+{
+    string symbol;
+    string storageKey;
+    datetime lockedD1Time;
+    bool isLocked;
+    
+    void Init(const string sym)
+    {
+        symbol = sym;
+        storageKey = "BO_Lock_" + sym;
+        lockedD1Time = 0;
+        isLocked = false;
+        RecoverFromStorage();
+    }
+    
+    void RecoverFromStorage()
+    {
+        datetime storedTime = (datetime)GlobalVariableGet(storageKey);
+        
+        if(storedTime > 0)
+        {
+            datetime currentD1 = iTime(symbol, PERIOD_D1, 0);
+            
+            if(storedTime == currentD1)
+            {
+                lockedD1Time = storedTime;
+                isLocked = true;
+                
+                Print("┌────────────────────────────────────────┐");
+                PrintFormat("│  🔒 %s: LOCK RECOVERED", symbol);
+                PrintFormat("│     From: GlobalVariable storage");
+                PrintFormat("│     Date: %s", TimeToString(storedTime, TIME_DATE));
+                PrintFormat("│     Status: LOCKED (no trading today)");
+                Print("└────────────────────────────────────────┘");
+            }
+            else
+            {
+                GlobalVariableDel(storageKey);
+                PrintFormat("✓ %s: Old lock cleared (D1 changed)", symbol);
+            }
+        }
+        else
+        {
+            PrintFormat("✓ %s: No previous lock found (ready to trade)", symbol);
+        }
+    }
+    
+    bool CanTrade()
+    {
+        datetime currentD1 = iTime(symbol, PERIOD_D1, 0);
+        
+        if(currentD1 != lockedD1Time && lockedD1Time > 0)
+        {
+            Print("┌────────────────────────────────────────┐");
+            PrintFormat("│  📅 %s: NEW D1 CANDLE", symbol);
+            PrintFormat("│     Previous: %s", TimeToString(lockedD1Time, TIME_DATE));
+            PrintFormat("│     Current:  %s", TimeToString(currentD1, TIME_DATE));
+            PrintFormat("│     Status: UNLOCKED (ready for new trade)");
+            Print("└────────────────────────────────────────┘");
+            Unlock();
+            return true;
+        }
+        
+        if(isLocked)
+        {
+            static datetime lastLog = 0;
+            if(TimeCurrent() - lastLog > 3600)
+            {
+                PrintFormat("🔒 %s: Still locked for %s", 
+                           symbol, TimeToString(lockedD1Time, TIME_DATE));
+                lastLog = TimeCurrent();
+            }
+            return false;
+        }
+        
+        datetime storedTime = (datetime)GlobalVariableGet(storageKey);
+        if(storedTime == currentD1 && storedTime > 0)
+        {
+            lockedD1Time = storedTime;
+            isLocked = true;
+            PrintFormat("⚠️ %s: Lock state synced from storage", symbol);
+            return false;
+        }
+        
+        return true;
+    }
+    
+    void Lock()
+    {
+        datetime currentD1 = iTime(symbol, PERIOD_D1, 0);
+        lockedD1Time = currentD1;
+        isLocked = true;
+        
+        if(!GlobalVariableSet(storageKey, (double)currentD1))
+        {
+            PrintFormat("⚠️ WARNING: Failed to save lock to storage for %s", symbol);
+        }
+        
+        datetime stored = (datetime)GlobalVariableGet(storageKey);
+        bool storageOK = (stored == currentD1);
+        
+        Print("┌────────────────────────────────────────┐");
+        PrintFormat("│  🔒 %s LOCKED FOR TODAY", symbol);
+        PrintFormat("│     Lock Time: %s", TimeToString(currentD1, TIME_DATE|TIME_MINUTES));
+        PrintFormat("│     Storage Key: %s", storageKey);
+        PrintFormat("│     Storage Status: %s", storageOK ? "✅ SAVED" : "❌ FAILED");
+        PrintFormat("│     Memory Status: ✅ LOCKED");
+        PrintFormat("│");
+        PrintFormat("│     ⛔ NO MORE PROCESSING TODAY");
+        PrintFormat("│     ⏰ Will unlock at next D1 candle");
+        Print("└────────────────────────────────────────┘");
+    }
+    
+    void Unlock()
+    {
+        isLocked = false;
+        lockedD1Time = 0;
+        
+        if(GlobalVariableCheck(storageKey))
+        {
+            GlobalVariableDel(storageKey);
+        }
+        
+        PrintFormat("🔓 %s: UNLOCKED (ready for new trade)", symbol);
+    }
+    
+    string GetStatus()
+    {
+        if(isLocked)
+        {
+            return StringFormat("🔒 LOCKED (%s)", TimeToString(lockedD1Time, TIME_DATE));
+        }
+        return "✅ READY";
+    }
+};
+
+//+------------------------------------------------------------------+
+//| Rejection Signal Structure                                       |
+//+------------------------------------------------------------------+
+struct RejectionSignal
+{
+    bool   isBullishRejection;
+    bool   isBearishRejection;
+    string rejectionType;
+    datetime signalTime;
+    
+    void Reset()
+    {
+        isBullishRejection = false;
+        isBearishRejection = false;
+        rejectionType = "NONE";
+        signalTime = 0;
+    }
+};
+
+//+------------------------------------------------------------------+
+//| Trading Symbol Structure                                         |
+//+------------------------------------------------------------------+
+struct TradingSymbol
+{
+    string symbol;
+    int atrHandle;
+    int adxHandle;
+    bool isActive;
+};
+
+//+------------------------------------------------------------------+
+//| Input Parameters                                                 |
+//+------------------------------------------------------------------+
+sinput string            GENERAL_PARAMS        = "=== General Settings ===";
+input int                MagicNumber           = 234567;
+
+sinput string            RISK_PARAMS           = "=== Risk Management ===";
+input double             RiskPercent           = 1.0;
+input int                MaxOpenPositions      = 1;
+input int                MaxTotalPositions     = 3;
+input double             MaxSpreadPips         = 5.0;
+
+sinput string            ADV_RISK_PARAMS       = "=== Advanced Risk Management ===";
+input bool               UseAdvancedRisk       = false;
+input bool               UseDrawdownDefense    = false;
+input double             DrawdownThreshold     = 3.0;
+input double             DrawdownRiskMultiplier = 0.5;
+input bool               UseProfitAccelerator  = false;
+input double             ProfitThreshold       = 3.0;
+input double             ProfitRiskMultiplier  = 1.5;
+input double             MaxRiskPercent        = 3.0;
+
+sinput string            TRAILING_PARAMS       = "=== Trailing Stop ===";
+input double             BEMultiplier          = 1.0;
+input double             TrailStartMultiplier  = 1.5;
+input double             TrailStopMultiplier   = 0.5;
+
+sinput string            TRADING_PARAMS        = "=== Trading Parameters ===";
+input int                ATRPeriod             = 14;
+input double             ATRStopLoss           = 2.0;
+input double             ATRTakeProfit         = 3.0;
+
+sinput string            FILTER_PARAMS         = "=== Filters ===";
+input bool               UseADXFilter          = true;
+input int                ADXPeriod             = 14;
+input double             MinADX                = 25.0;
+input bool               UseSessionFilter      = true;
+input int                LondonStart           = 8;
+input int                LondonEnd             = 17;
+input int                NewYorkStart          = 13;
+input int                NewYorkEnd            = 22;
+input bool               UseSpreadFilter       = true;
+
+sinput string            DISPLAY_PARAMS        = "=== Display ===";
+input bool               ShowDashboard         = true;
+input int                DashboardX            = 20;
+input int                DashboardY            = 50;
+input color              DashboardColor        = clrWhite;
+input int                DashboardFontSize     = 8;
+
+//+------------------------------------------------------------------+
+//| HTFData Structure                                                |
+//+------------------------------------------------------------------+
+struct HTFData
+{
+    double open;
+    double close;
+    double high;
+    double low;
+    datetime time;
+    double breakLevel;
+    bool breakoutUp;
+    bool breakoutDown;
+    
+    void Reset()
+    {
+        open = 0;
+        close = 0;
+        high = 0;
+        low = 0;
+        time = 0;
+        breakLevel = 0;
+        breakoutUp = false;
+        breakoutDown = false;
+    }
+    
+    HTFData() { Reset(); }
+};
+
+//+------------------------------------------------------------------+
+//| Structure for Symbol Trading Stats                               |
+//+------------------------------------------------------------------+
+struct SymbolStats
+{
+    datetime lastTradeTime;
+    double totalProfit;
+    int totalTrades;
+    int winningTrades;
+    int losingTrades;
+    
+    void Reset()
+    {
+        lastTradeTime = 0;
+        totalProfit = 0;
+        totalTrades = 0;
+        winningTrades = 0;
+        losingTrades = 0;
+    }
+    
+    SymbolStats() { Reset(); }
+};
+
+//+------------------------------------------------------------------+
+//| Global Variables                                                  |
+//+------------------------------------------------------------------+
+#define SYMBOL_COUNT 6
+
+TradingSymbol g_tradingSymbols[SYMBOL_COUNT];
+HTFData g_htfData[SYMBOL_COUNT];
+SymbolStats g_stats[SYMBOL_COUNT];
+PersistentBreakoutLock g_symbolLocks[SYMBOL_COUNT];
+
+CAccountInfo g_account;
+CTrade g_eaTrade;
+CSymbolInfo g_eaSymbolInfo;
+CPositionInfo g_eaPosition;
+datetime g_lastCheck = 0;
+bool g_initialized = false;
+
+double g_advInitialBalance = 0;
+double g_advPeakBalance = 0;
+double g_advCurrentDrawdown = 0;
+double g_advCurrentProfit = 0;
+double g_advAdjustedRisk = 0;
+
+//+------------------------------------------------------------------+
+//| Initialize Trading Symbols                                       |
+//+------------------------------------------------------------------+
+void InitializeTradingSymbols()
+{
+    g_tradingSymbols[0].symbol = "EURUSD";
+    g_tradingSymbols[1].symbol = "AUDUSD";
+    g_tradingSymbols[2].symbol = "USDJPY";
+    g_tradingSymbols[3].symbol = "USDCAD";
+    g_tradingSymbols[4].symbol = "GBPJPY";
+    g_tradingSymbols[5].symbol = "XAUUSD";
+    
+    for(int i = 0; i < SYMBOL_COUNT; i++)
+    {
+        g_tradingSymbols[i].atrHandle = INVALID_HANDLE;
+        g_tradingSymbols[i].adxHandle = INVALID_HANDLE;
+        g_tradingSymbols[i].isActive = false;
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Get ADX Value                                                    |
+//+------------------------------------------------------------------+
+double GetADXValue(const int index)
+{
+    if(g_tradingSymbols[index].adxHandle == INVALID_HANDLE)
+        return 0;
+    
+    double adxBuffer[];
+    ArraySetAsSeries(adxBuffer, true);
+    
+    if(CopyBuffer(g_tradingSymbols[index].adxHandle, 0, 0, 1, adxBuffer) <= 0)
+    {
+        PrintFormat("ERROR: Failed to copy ADX buffer for index %d", index);
+        return 0;
+    }
+    
+    return adxBuffer[0];
+}
+
+//+------------------------------------------------------------------+
+//| Check ADX Filter                                                 |
+//+------------------------------------------------------------------+
+bool CheckADXFilter(const string symbol, const int index)
+{
+    if(!UseADXFilter)
+        return true;
+    
+    double adxValue = GetADXValue(index);
+    
+    if(adxValue <= 0)
+    {
+        PrintFormat("WARNING: %s - Invalid ADX value", symbol);
+        return false;
+    }
+    
+    if(adxValue < MinADX)
+    {
+        PrintFormat("%s: ADX Filter REJECTED | ADX: %.2f < Min: %.2f", 
+                   symbol, adxValue, MinADX);
+        return false;
+    }
+    
+    PrintFormat("%s: ADX Filter PASSED | ADX: %.2f >= Min: %.2f", 
+               symbol, adxValue, MinADX);
+    return true;
+}
+
+//+------------------------------------------------------------------+
+//| Price Position Detection                                          |
+//+------------------------------------------------------------------+
+RejectionSignal PricePosition(const string symbol, double keyLevel)
+{
+    RejectionSignal signal;
+    signal.Reset();
+    
+    double open[], close[], high[], low[];
+    datetime time[];
+    
+    if(CopyOpen(symbol, PERIOD_H1, 1, 3, open) < 3 ||
+       CopyClose(symbol, PERIOD_H1, 1, 3, close) < 3 ||
+       CopyHigh(symbol, PERIOD_H1, 1, 3, high) < 3 ||
+       CopyLow(symbol, PERIOD_H1, 1, 3, low) < 3 ||
+       CopyTime(symbol, PERIOD_H1, 1, 3, time) < 3)
+    {
+        Print("ERROR: Failed to copy price data for ", symbol);
+        return signal;
+    }
+    
+    double o1 = open[0],  c1 = close[0],  h1 = high[0],  l1 = low[0];
+    double o2 = open[1],  c2 = close[1],  h2 = high[1],  l2 = low[1];
+    
+    signal.signalTime = time[0];
+    
+    double body1 = MathAbs(c1 - o1);
+    double upperWick1 = h1 - MathMax(o1, c1);
+    double lowerWick1 = MathMin(o1, c1) - l1;
+    double totalRange1 = h1 - l1;
+    
+    if(totalRange1 < 0.00001)
+        return signal;
+    
+    double bodyRatio = body1 / totalRange1;
+    double upperWickRatio = upperWick1 / totalRange1;
+    double lowerWickRatio = lowerWick1 / totalRange1;
+    
+    if(bodyRatio < 0.25)
+        return signal;
+    
+    if(lowerWickRatio > 0.5 && bodyRatio < 0.4)
+    {
+        signal.isBullishRejection = true;
+        signal.rejectionType = "PIN_BAR";
+    }
+    else if(c1 > o1 && o2 > c2 && c1 > o2 && o1 >= c2)
+    {
+        signal.isBullishRejection = true;
+        signal.rejectionType = "ENGULFING";
+    }
+    else if(h1 <= h2 && l1 >= l2 && c1 > o1)
+    {
+        signal.isBullishRejection = true;
+        signal.rejectionType = "INSIDE_BAR";
+    }
+    else if(c1 > o1 && o2 > c2 && c1 < o2 && o1 > c2)
+    {
+        signal.isBullishRejection = true;
+        signal.rejectionType = "HARAMI";
+    }
+    
+    if(upperWickRatio > 0.5 && bodyRatio < 0.4)
+    {
+        signal.isBearishRejection = true;
+        signal.rejectionType = "SHOOTING_STAR";
+    }
+    else if(c1 < o1 && o2 < c2 && c1 < o2 && o1 <= c2)
+    {
+        signal.isBearishRejection = true;
+        signal.rejectionType = "ENGULFING";
+    }
+    else if(h1 <= h2 && l1 >= l2 && c1 < o1)
+    {
+        signal.isBearishRejection = true;
+        signal.rejectionType = "INSIDE_BAR";
+    }
+    else if(c1 < o1 && o2 < c2 && c1 > o2 && o1 < c2)
+    {
+        signal.isBearishRejection = true;
+        signal.rejectionType = "HARAMI";
+    }
+    
+    return signal;
+}
+
+//+------------------------------------------------------------------+
+//| Initialize Advanced Risk Management                              |
+//+------------------------------------------------------------------+
+void InitializeAdvancedRiskManagement()
+{
+    if(!UseAdvancedRisk)
+    {
+        PrintFormat("Advanced Risk Management: DISABLED (using standard %.2f%%)", RiskPercent);
+        return;
+    }
+    
+    g_advInitialBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+    g_advPeakBalance = g_advInitialBalance;
+    g_advAdjustedRisk = RiskPercent;
+    
+    Print("========================================");
+    Print("Advanced Risk Management: ENABLED");
+    PrintFormat("  Initial Balance: $%.2f", g_advInitialBalance);
+    PrintFormat("  Base Risk: %.2f%%", RiskPercent);
+    PrintFormat("  Drawdown Defense: %s (trigger: %.1f%%)", 
+               UseDrawdownDefense ? "ON" : "OFF", DrawdownThreshold);
+    PrintFormat("  Profit Accelerator: %s (trigger: %.1f%%)", 
+               UseProfitAccelerator ? "ON" : "OFF", ProfitThreshold);
+    Print("========================================");
+}
+
+//+------------------------------------------------------------------+
+//| Calculate Dynamic Risk Based on Account State                    |
+//+------------------------------------------------------------------+
+double CalculateDynamicRiskPercentage()
+{
+    if(!UseAdvancedRisk)
+        return RiskPercent;
+    
+    double currentBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+    
+    if(currentBalance > g_advPeakBalance)
+        g_advPeakBalance = currentBalance;
+    
+    if(g_advInitialBalance > 0)
+        g_advCurrentProfit = ((currentBalance - g_advInitialBalance) / g_advInitialBalance) * 100.0;
+    
+    if(g_advPeakBalance > 0)
+        g_advCurrentDrawdown = ((g_advPeakBalance - currentBalance) / g_advPeakBalance) * 100.0;
+    
+    double adjustedRisk = RiskPercent;
+    
+    if(UseDrawdownDefense && g_advCurrentDrawdown >= DrawdownThreshold)
+    {
+        adjustedRisk *= DrawdownRiskMultiplier;
+        
+        static datetime lastDrawdownAlert = 0;
+        if(TimeCurrent() - lastDrawdownAlert > 3600)
+        {
+            PrintFormat("⚠️ DRAWDOWN DEFENSE: %.2f%% DD | Risk: %.2f%% → %.2f%%", 
+                       g_advCurrentDrawdown, RiskPercent, adjustedRisk);
+            lastDrawdownAlert = TimeCurrent();
+        }
+    }
+    else if(UseProfitAccelerator && g_advCurrentProfit >= ProfitThreshold)
+    {
+        adjustedRisk *= ProfitRiskMultiplier;
+        
+        static datetime lastProfitAlert = 0;
+        if(TimeCurrent() - lastProfitAlert > 3600)
+        {
+            PrintFormat("🚀 PROFIT ACCELERATOR: +%.2f%% | Risk: %.2f%% → %.2f%%", 
+                       g_advCurrentProfit, RiskPercent, adjustedRisk);
+            lastProfitAlert = TimeCurrent();
+        }
+    }
+    
+    adjustedRisk = MathMin(adjustedRisk, MaxRiskPercent);
+    adjustedRisk = MathMax(adjustedRisk, 0.1);
+    
+    g_advAdjustedRisk = adjustedRisk;
+    return adjustedRisk;
+}
+
+//+------------------------------------------------------------------+
+//| Get Advanced Risk Status                                         |
+//+------------------------------------------------------------------+
+string GetAdvancedRiskStatus()
+{
+    if(!UseAdvancedRisk)
+        return "";
+        
+    string status = "";
+    
+    if(g_advCurrentDrawdown >= DrawdownThreshold && UseDrawdownDefense)
+    {
+        status = StringFormat(" | ⚠️ DEFENSE (%.1f%% DD)", g_advCurrentDrawdown);
+    }
+    else if(g_advCurrentProfit >= ProfitThreshold && UseProfitAccelerator)
+    {
+        status = StringFormat(" | 🚀 ACCELERATOR (+%.1f%%)", g_advCurrentProfit);
+    }
+    
+    return status;
+}
+
+//+------------------------------------------------------------------+
+//| Initialize in OnInit()                                            |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+    Print("========================================");
+    Print("Initializing Breakout EA v2.13");
+    Print("🔒 ONE TRADE PER SYMBOL PER DAY");
+    Print("💾 PERSISTENT LOCK (survives restarts)");
+    Print("========================================");
+    
+    g_eaTrade.SetExpertMagicNumber(MagicNumber);
+    g_eaTrade.SetDeviationInPoints(10);
+    g_eaTrade.SetTypeFilling(ORDER_FILLING_IOC);
+    g_eaTrade.SetAsyncMode(false);
+    g_eaTrade.LogLevel(LOG_LEVEL_ERRORS);
+    
+    InitializeTradingSymbols();
+    InitializeAdvancedRiskManagement();
+    
+    int validSymbols = 0;
+    
+    for(int i = 0; i < SYMBOL_COUNT; i++)
+    {
+        string symbol = g_tradingSymbols[i].symbol;
+        
+        if(!SymbolInfoInteger(symbol, SYMBOL_SELECT))
+        {
+            if(!SymbolSelect(symbol, true))
+            {
+                PrintFormat("ERROR: Symbol %s not found", symbol);
+                continue;
+            }
+        }
