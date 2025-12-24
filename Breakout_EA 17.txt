@@ -1504,6 +1504,58 @@ void DrawHTFLevels(const string symbol, const int index)
     ObjectSetInteger(0, "HTF_Range_" + symbol, OBJPROP_BACK, true);
     
     ChartRedraw();
+} 
+
+//+------------------------------------------------------------------+
+//| Check Breakout                                                    |
+//+------------------------------------------------------------------+
+bool CheckBreakout(const string symbol, const int index, ENUM_ORDER_TYPE &orderType, double &breakLevel)
+{
+    double closeD1[];
+    if(CopyClose(symbol, PERIOD_D1, 0, 1, closeD1) <= 0)
+        return false;
+    
+    double currentPriceD1 = closeD1[0];
+    
+    double closeH4[];
+    if(CopyClose(symbol, PERIOD_H4, 1, 1, closeH4) <= 0)
+        return false;
+    
+    double prevH4Close = closeH4[0];
+    
+    // Check BREAKOUT UP
+    if(currentPriceD1 > g_htfData[index].high && 
+       prevH4Close > g_htfData[index].high)
+    {
+        orderType = ORDER_TYPE_BUY;
+        breakLevel = g_htfData[index].high;
+        
+        Print("========================================");
+        PrintFormat("  BREAKOUT UP: %s", symbol);
+        PrintFormat("     D1 Close: %.5f", currentPriceD1);
+        PrintFormat("     D1 High:  %.5f", g_htfData[index].high);
+        PrintFormat("     Diff:     %.5f", currentPriceD1 - g_htfData[index].high);
+        Print("========================================");
+        return true;
+    }
+    
+    // Check BREAKOUT DOWN
+    if(currentPriceD1 < g_htfData[index].low && 
+       prevH4Close < g_htfData[index].low)
+    {
+        orderType = ORDER_TYPE_SELL;
+        breakLevel = g_htfData[index].low;
+        
+        Print("========================================");
+        PrintFormat("  BREAKOUT DOWN: %s", symbol);
+        PrintFormat("     D1 Close: %.5f", currentPriceD1);
+        PrintFormat("     D1 Low:   %.5f", g_htfData[index].low);
+        PrintFormat("     Diff:     %.5f", g_htfData[index].low - currentPriceD1);
+        Print("========================================");
+        return true;
+    }
+    
+    return false;
 }
 
 //+------------------------------------------------------------------+
@@ -1638,3 +1690,4 @@ bool ExecuteTrade(const string symbol, const int index, const ENUM_ORDER_TYPE or
         return false;
     }
 }
+
