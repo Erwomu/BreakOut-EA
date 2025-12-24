@@ -12,6 +12,7 @@
 #include <Trade\PositionInfo.mqh>
 #include <Trade\AccountInfo.mqh>
 
+
 //+------------------------------------------------------------------+
 //| Persistent Lock Structure with GlobalVariable Storage             |
 //+------------------------------------------------------------------+
@@ -21,6 +22,7 @@ struct PersistentBreakoutLock
     string storageKey;
     datetime lockedD1Time;
     bool isLocked;
+    bool isProcessing;  // ADD: Processing flag
     
     void Init(const string sym)
     {
@@ -28,6 +30,7 @@ struct PersistentBreakoutLock
         storageKey = "BO_Lock_" + sym;
         lockedD1Time = 0;
         isLocked = false;
+        isProcessing = false;  // ADD: Initialize processing flag
         RecoverFromStorage();
     }
     
@@ -67,6 +70,7 @@ struct PersistentBreakoutLock
     {
         datetime currentD1 = iTime(symbol, PERIOD_D1, 0);
         
+        // Check if new D1 candle (unlock condition)
         if(currentD1 != lockedD1Time && lockedD1Time > 0)
         {
             Print("┌────────────────────────────────────────┐");
@@ -79,6 +83,7 @@ struct PersistentBreakoutLock
             return true;
         }
         
+        // If locked, cannot trade
         if(isLocked)
         {
             static datetime lastLog = 0;
@@ -91,6 +96,13 @@ struct PersistentBreakoutLock
             return false;
         }
         
+        // If currently processing, cannot trade (prevents concurrent attempts)
+        if(isProcessing)
+        {
+            return false;
+        }
+        
+        // Check storage sync
         datetime storedTime = (datetime)GlobalVariableGet(storageKey);
         if(storedTime == currentD1 && storedTime > 0)
         {
@@ -108,6 +120,7 @@ struct PersistentBreakoutLock
         datetime currentD1 = iTime(symbol, PERIOD_D1, 0);
         lockedD1Time = currentD1;
         isLocked = true;
+        isProcessing = false;  // Reset processing flag when locking
         
         if(!GlobalVariableSet(storageKey, (double)currentD1))
         {
@@ -133,6 +146,7 @@ struct PersistentBreakoutLock
     {
         isLocked = false;
         lockedD1Time = 0;
+        isProcessing = false;  // Reset processing flag when unlocking
         
         if(GlobalVariableCheck(storageKey))
         {
@@ -142,11 +156,21 @@ struct PersistentBreakoutLock
         PrintFormat("🔓 %s: UNLOCKED (ready for new trade)", symbol);
     }
     
+    // ADD: Method to set/clear processing flag
+    void SetProcessing(bool flag)
+    {
+        isProcessing = flag;
+    }
+    
     string GetStatus()
     {
         if(isLocked)
         {
             return StringFormat("🔒 LOCKED (%s)", TimeToString(lockedD1Time, TIME_DATE));
+        }
+        if(isProcessing)
+        {
+            return "⏳ PROCESSING";
         }
         return "✅ READY";
     }
@@ -1722,3 +1746,4 @@ bool ExecuteTrade(const string symbol, const int index, const ENUM_ORDER_TYPE or
         return false; // FAILED - but will still trigger lock to prevent repeated attempts
     }
 }
+
