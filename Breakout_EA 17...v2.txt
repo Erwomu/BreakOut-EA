@@ -1400,95 +1400,86 @@ int CountBreakoutPositions(const string symbol)
 }
 
 //+------------------------------------------------------------------+
-//| CRITICAL FIX #3: Lock IMMEDIATELY When Setup Confirmed            |
+//| BULLETPROOF FIX: Lock IMMEDIATELY after breakout detection      |
 //+------------------------------------------------------------------+
-// REPLACE your ProcessSymbol function with this:
-
 void ProcessSymbol(const string symbol, const int index)
 {
-    // 1. CHECK LOCK FIRST
+    // 1. CHECK LOCK FIRST - exit immediately if locked
     if(!g_symbolLocks[index].CanTrade())
     {
         return;
     }
     
-    // 2. SET PROCESSING FLAG
-    g_symbolLocks[index].SetProcessing(true);
-    
-    // 3. Check session filter
+    // 2. Check session filter (fast rejection, no lock)
     if(UseSessionFilter && !IsInTradingSession())
     {
-        g_symbolLocks[index].SetProcessing(false);
         return;
     }
     
-    // 4. Manage existing positions
+    // 3. Manage existing positions
     ManagePositions(symbol, index);
     
-    // 5. Check position limits
+    // 4. Check position limits (fast rejection, no lock)
     int currentPositions = CountBreakoutPositions(symbol);
     if(currentPositions >= MaxOpenPositions)
     {
-        g_symbolLocks[index].SetProcessing(false);
         return;
     }
     
     int totalPositions = GetAllPositionsCount();
     if(totalPositions >= MaxTotalPositions)
     {
-        g_symbolLocks[index].SetProcessing(false);
         return;
     }
     
-    // 6. Check for breakout
+    // 5. Check for breakout (expensive check, so do it after quick filters)
     ENUM_ORDER_TYPE orderType;
     double breakLevel;
     
     if(!CheckBreakout(symbol, index, orderType, breakLevel))
     {
-        g_symbolLocks[index].SetProcessing(false);
-        return;
+        return;  // No breakout, exit
     }
     
-    PrintFormat("TARGET %s: Breakout detected on %s - checking filters...", 
+    // ⚠️ CRITICAL: LOCK NOW - Before any other checks
+    // This is the "intent lock" - we found a valid breakout, so consume the day
+    PrintFormat("🔒 %s: Breakout detected - LOCKING IMMEDIATELY (before filters)", symbol);
+    g_symbolLocks[index].Lock();
+    
+    // Store breakout level for reference
+    g_htfData[index].breakLevel = breakLevel;
+    
+    PrintFormat("TARGET %s: Breakout detected on %s - now checking filters...", 
                symbol, 
                TimeToString(TodayKey(), TIME_DATE));
     
-    g_htfData[index].breakLevel = breakLevel;
-    
-    // 7. Check entry confirmation
+    // 6. Now check entry confirmation (expensive, but day already locked)
     if(!CheckEntryConfirmation(symbol, index, orderType))
     {
-        PrintFormat("WAIT %s: Breakout detected but waiting for entry confirmation", symbol);
-        g_symbolLocks[index].SetProcessing(false);
-        return;  // NO LOCK - wait for confirmation
+        PrintFormat("⚠️ %s: No entry confirmation - day consumed but no trade", symbol);
+        return;  // Day locked, no trade
     }
     
-    // 8. Check spread filter
+    // 7. Check spread filter
     if(UseSpreadFilter && !IsSpreadAcceptable(symbol))
     {
-        PrintFormat("REJECT %s: Breakout + confirmation OK, but spread too high", symbol);
-        g_symbolLocks[index].SetProcessing(false);
-        return;  // NO LOCK - spread might improve
+        PrintFormat("⚠️ %s: Spread too high - day consumed but no trade", symbol);
+        return;  // Day locked, no trade
     }
     
-    // 9. LOCK FIRST - this is the intent lock (prevents second trade)
-    PrintFormat("OK %s: Valid setup confirmed - LOCKING NOW before trade execution", symbol);
-    g_symbolLocks[index].Lock();
-    
-    // 10. THEN execute trade
-    PrintFormat("OK %s: Executing trade...", symbol);
+    // 8. All checks passed - execute trade
+    PrintFormat("✅ %s: All filters passed - executing trade...", symbol);
     bool tradeExecuted = ExecuteTrade(symbol, index, orderType, breakLevel);
     
     if(tradeExecuted)
     {
-        PrintFormat("SUCCESS %s: Trade executed - day locked", symbol);
+        PrintFormat("SUCCESS %s: Trade executed successfully", symbol);
     }
     else
     {
-        PrintFormat("WARNING %s: Trade failed but day still consumed (setup was valid)", symbol);
+        PrintFormat("WARNING %s: Trade execution failed (but day already consumed)", symbol);
     }
-} 
+}
 
 //+------------------------------------------------------------------+
 //| Check New HTF Candle                                              |
@@ -1763,4 +1754,5 @@ bool ExecuteTrade(const string symbol, const int index, const ENUM_ORDER_TYPE or
         return false; // FAILED - but will still trigger lock to prevent repeated attempts
     }
 }
+
 
