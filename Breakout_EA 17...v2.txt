@@ -1420,100 +1420,96 @@ inline void EndProcessing(const int index)
 //+------------------------------------------------------------------+
 void ProcessSymbol(const string symbol, const int index)
 {
-    // ===============================
-    // 0️⃣ LOCK & PROCESSING GATE
-    // ===============================
+    // =====================================
+    // 0️⃣ DAILY LOCK GATE
+    // =====================================
     if(!g_symbolLocks[index].CanTrade())
         return;
 
-    StartProcessing(index);
+    g_symbolLocks[index].SetProcessing(true);
 
-    // ===============================
+    // =====================================
     // 1️⃣ SESSION FILTER
-    // ===============================
+    // =====================================
     if(UseSessionFilter && !IsInTradingSession())
     {
-        EndProcessing(index);
+        g_symbolLocks[index].SetProcessing(false);
         return;
     }
 
-    // ===============================
+    // =====================================
     // 2️⃣ MANAGE EXISTING POSITIONS
-    // ===============================
+    // =====================================
     ManagePositions(symbol, index);
 
-    // ===============================
-    // 3️⃣ POSITION LIMITS
-    // ===============================
-    if(GetSymbolPositionsCount(symbol) > 0)
+    // =====================================
+    // 3️⃣ HARD POSITION LIMITS
+    // =====================================
+    if(GetSymbolPositionsCount(symbol) > 0 ||
+       GetAllPositionsCount() >= MaxTotalPositions)
     {
-        EndProcessing(index);
+        g_symbolLocks[index].SetProcessing(false);
         return;
     }
 
-    if(GetAllPositionsCount() >= MaxTotalPositions)
-    {
-        EndProcessing(index);
-        return;
-    }
-
-    // ===============================
+    // =====================================
     // 4️⃣ BREAKOUT DETECTION
-    // ===============================
+    // =====================================
     ENUM_ORDER_TYPE orderType;
-    double breakLevel = 0.0;
+    double breakLevel;
 
     if(!CheckBreakout(symbol, index, orderType, breakLevel))
     {
-        EndProcessing(index);
+        g_symbolLocks[index].SetProcessing(false);
         return;
     }
 
     g_htfData[index].breakLevel = breakLevel;
 
-    PrintFormat("🎯 %s: Breakout detected, waiting for confirmation", symbol);
-
-    // ===============================
+    // =====================================
     // 5️⃣ ENTRY CONFIRMATION
-    // ===============================
+    // =====================================
     if(!CheckEntryConfirmation(symbol, index, orderType))
     {
-        EndProcessing(index);
+        g_symbolLocks[index].SetProcessing(false);
         return;
     }
 
-    // ===============================
+    // =====================================
     // 6️⃣ SPREAD FILTER
-    // ===============================
+    // =====================================
     if(UseSpreadFilter && !IsSpreadAcceptable(symbol))
     {
-        PrintFormat("⏸ %s: Spread too high, setup valid but delayed", symbol);
-        EndProcessing(index);
+        g_symbolLocks[index].SetProcessing(false);
         return;
     }
 
-    // ===============================
-    // 7️⃣ EXECUTE TRADE
-    // ===============================
-    PrintFormat("🚀 %s: Executing breakout trade", symbol);
+    // =====================================
+    // 🔒 7️⃣ DAILY LOCK — SETUP CONFIRMED
+    // =====================================
+    PrintFormat("🔒 %s: Valid setup confirmed — day consumed", symbol);
+    g_symbolLocks[index].Lock();
 
+    // =====================================
+    // 8️⃣ EXECUTE TRADE (BEST EFFORT)
+    // =====================================
     bool tradeExecuted = ExecuteTrade(symbol, index, orderType, breakLevel);
 
     if(tradeExecuted)
     {
-        g_symbolLocks[index].Lock();
-        ResetBreakoutState(index);
-
-        PrintFormat("🔒 %s: Trade executed — day locked", symbol);
+        PrintFormat("✅ %s: Trade executed successfully", symbol);
     }
     else
     {
-        ResetBreakoutState(index);
-
-        PrintFormat("⚠️ %s: Trade failed — breakout reset, will scan again", symbol);
+        PrintFormat("⚠️ %s: Trade failed, but setup was valid — no retrade today", symbol);
     }
 
-    EndProcessing(index);
+    // =====================================
+    // 9️⃣ RESET BREAKOUT STATE
+    // =====================================
+    ResetBreakoutState(index);
+
+    g_symbolLocks[index].SetProcessing(false);
 }
 
 //+------------------------------------------------------------------+
@@ -1789,6 +1785,7 @@ bool ExecuteTrade(const string symbol, const int index, const ENUM_ORDER_TYPE or
         return false; // FAILED - but will still trigger lock to prevent repeated attempts
     }
 }
+
 
 
 
