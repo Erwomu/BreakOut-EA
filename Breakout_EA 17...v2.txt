@@ -12,6 +12,9 @@
 #include <Trade\PositionInfo.mqh>
 #include <Trade\AccountInfo.mqh>
 
+#define PROCESS_GUARD_START() g_symbolLocks[index].SetProcessing(true)
+#define PROCESS_GUARD_END()   g_symbolLocks[index].SetProcessing(false) 
+#define EXIT_PROCESS() { PROCESS_GUARD_END(); return; }
 
 //+------------------------------------------------------------------+
 //| CRITICAL FIX #1: Use Calendar Day, Not D1 Candle Time             |
@@ -1399,86 +1402,102 @@ int CountBreakoutPositions(const string symbol)
     return count;
 }
 
+void ResetBreakoutState(const int index)
+{
+    g_htfData[index].breakoutUp   = false;
+    g_htfData[index].breakoutDown = false;
+    g_htfData[index].breakLevel   = 0.0;
+}
+
 //+------------------------------------------------------------------+
 //| BULLETPROOF FIX: Lock IMMEDIATELY after breakout detection      |
 //+------------------------------------------------------------------+
 void ProcessSymbol(const string symbol, const int index)
 {
-    // 1. CHECK LOCK FIRST - exit immediately if locked
+    // ===============================
+    // 0️⃣ LOCK & PROCESSING GATE
+    // ===============================
     if(!g_symbolLocks[index].CanTrade())
-    {
         return;
-    }
-    
-    // 2. Check session filter (fast rejection, no lock)
+
+    PROCESS_GUARD_START();
+
+    // ===============================
+    // 1️⃣ SESSION FILTER
+    // ===============================
     if(UseSessionFilter && !IsInTradingSession())
-    {
-        return;
-    }
-    
-    // 3. Manage existing positions
+        EXIT_PROCESS();
+
+    // ===============================
+    // 2️⃣ MANAGE EXISTING POSITIONS
+    // ===============================
     ManagePositions(symbol, index);
-    
-    // 4. Check position limits (fast rejection, no lock)
-    int currentPositions = CountBreakoutPositions(symbol);
-    if(currentPositions >= MaxOpenPositions)
-    {
-        return;
-    }
-    
-    int totalPositions = GetAllPositionsCount();
-    if(totalPositions >= MaxTotalPositions)
-    {
-        return;
-    }
-    
-    // 5. Check for breakout (expensive check, so do it after quick filters)
+
+    // ===============================
+    // 3️⃣ POSITION LIMITS
+    // ===============================
+    if(GetSymbolPositionsCount(symbol) > 0)
+        EXIT_PROCESS();
+
+    if(GetAllPositionsCount() >= MaxTotalPositions)
+        EXIT_PROCESS();
+
+    // ===============================
+    // 4️⃣ BREAKOUT DETECTION
+    // ===============================
     ENUM_ORDER_TYPE orderType;
-    double breakLevel;
-    
+    double breakLevel = 0.0;
+
     if(!CheckBreakout(symbol, index, orderType, breakLevel))
-    {
-        return;  // No breakout, exit
-    }
-    
-    // ⚠️ CRITICAL: LOCK NOW - Before any other checks
-    // This is the "intent lock" - we found a valid breakout, so consume the day
-    PrintFormat("🔒 %s: Breakout detected - LOCKING IMMEDIATELY (before filters)", symbol);
-    g_symbolLocks[index].Lock();
-    
-    // Store breakout level for reference
+        EXIT_PROCESS();
+
     g_htfData[index].breakLevel = breakLevel;
-    
-    PrintFormat("TARGET %s: Breakout detected on %s - now checking filters...", 
-               symbol, 
-               TimeToString(TodayKey(), TIME_DATE));
-    
-    // 6. Now check entry confirmation (expensive, but day already locked)
+
+    PrintFormat("🎯 %s: Breakout detected, waiting for confirmation", symbol);
+
+    // ===============================
+    // 5️⃣ ENTRY CONFIRMATION
+    // ===============================
     if(!CheckEntryConfirmation(symbol, index, orderType))
-    {
-        PrintFormat("⚠️ %s: No entry confirmation - day consumed but no trade", symbol);
-        return;  // Day locked, no trade
-    }
-    
-    // 7. Check spread filter
+        EXIT_PROCESS();  // WAIT — do not lock, do not reset
+
+    // ===============================
+    // 6️⃣ SPREAD FILTER
+    // ===============================
     if(UseSpreadFilter && !IsSpreadAcceptable(symbol))
     {
-        PrintFormat("⚠️ %s: Spread too high - day consumed but no trade", symbol);
-        return;  // Day locked, no trade
+        PrintFormat("⏸ %s: Spread too high, setup valid but delayed", symbol);
+        EXIT_PROCESS();
     }
-    
-    // 8. All checks passed - execute trade
-    PrintFormat("✅ %s: All filters passed - executing trade...", symbol);
+
+    // ===============================
+    // 7️⃣ EXECUTE TRADE
+    // ===============================
+    PrintFormat("🚀 %s: Executing breakout trade", symbol);
+
     bool tradeExecuted = ExecuteTrade(symbol, index, orderType, breakLevel);
-    
+
     if(tradeExecuted)
     {
-        PrintFormat("SUCCESS %s: Trade executed successfully", symbol);
+        // ===============================
+        // 8️⃣ LOCK DAY + RESET STATE
+        // ===============================
+        g_symbolLocks[index].Lock();
+        ResetBreakoutState(index);
+
+        PrintFormat("🔒 %s: Trade executed — day locked", symbol);
     }
     else
     {
-        PrintFormat("WARNING %s: Trade execution failed (but day already consumed)", symbol);
+        // ===============================
+        // 9️⃣ FAILED EXECUTION RECOVERY
+        // ===============================
+        ResetBreakoutState(index);
+
+        PrintFormat("⚠️ %s: Trade failed — breakout reset, will scan again", symbol);
     }
+
+    PROCESS_GUARD_END();
 }
 
 //+------------------------------------------------------------------+
@@ -1754,5 +1773,6 @@ bool ExecuteTrade(const string symbol, const int index, const ENUM_ORDER_TYPE or
         return false; // FAILED - but will still trigger lock to prevent repeated attempts
     }
 }
+
 
 
