@@ -12,10 +12,6 @@
 #include <Trade\PositionInfo.mqh>
 #include <Trade\AccountInfo.mqh>
 
-#define PROCESS_GUARD_START() g_symbolLocks[index].SetProcessing(true)
-#define PROCESS_GUARD_END()   g_symbolLocks[index].SetProcessing(false) 
-#define EXIT_PROCESS() { PROCESS_GUARD_END(); return; }
-
 //+------------------------------------------------------------------+
 //| CRITICAL FIX #1: Use Calendar Day, Not D1 Candle Time             |
 //+------------------------------------------------------------------+
@@ -1407,6 +1403,16 @@ void ResetBreakoutState(const int index)
     g_htfData[index].breakoutUp   = false;
     g_htfData[index].breakoutDown = false;
     g_htfData[index].breakLevel   = 0.0;
+} 
+
+inline void StartProcessing(const int index)
+{
+    g_symbolLocks[index].SetProcessing(true);
+}
+
+inline void EndProcessing(const int index)
+{
+    g_symbolLocks[index].SetProcessing(false);
 }
 
 //+------------------------------------------------------------------+
@@ -1420,13 +1426,16 @@ void ProcessSymbol(const string symbol, const int index)
     if(!g_symbolLocks[index].CanTrade())
         return;
 
-    PROCESS_GUARD_START();
+    StartProcessing(index);
 
     // ===============================
     // 1️⃣ SESSION FILTER
     // ===============================
     if(UseSessionFilter && !IsInTradingSession())
-        EXIT_PROCESS();
+    {
+        EndProcessing(index);
+        return;
+    }
 
     // ===============================
     // 2️⃣ MANAGE EXISTING POSITIONS
@@ -1437,10 +1446,16 @@ void ProcessSymbol(const string symbol, const int index)
     // 3️⃣ POSITION LIMITS
     // ===============================
     if(GetSymbolPositionsCount(symbol) > 0)
-        EXIT_PROCESS();
+    {
+        EndProcessing(index);
+        return;
+    }
 
     if(GetAllPositionsCount() >= MaxTotalPositions)
-        EXIT_PROCESS();
+    {
+        EndProcessing(index);
+        return;
+    }
 
     // ===============================
     // 4️⃣ BREAKOUT DETECTION
@@ -1449,7 +1464,10 @@ void ProcessSymbol(const string symbol, const int index)
     double breakLevel = 0.0;
 
     if(!CheckBreakout(symbol, index, orderType, breakLevel))
-        EXIT_PROCESS();
+    {
+        EndProcessing(index);
+        return;
+    }
 
     g_htfData[index].breakLevel = breakLevel;
 
@@ -1459,7 +1477,10 @@ void ProcessSymbol(const string symbol, const int index)
     // 5️⃣ ENTRY CONFIRMATION
     // ===============================
     if(!CheckEntryConfirmation(symbol, index, orderType))
-        EXIT_PROCESS();  // WAIT — do not lock, do not reset
+    {
+        EndProcessing(index);
+        return;
+    }
 
     // ===============================
     // 6️⃣ SPREAD FILTER
@@ -1467,7 +1488,8 @@ void ProcessSymbol(const string symbol, const int index)
     if(UseSpreadFilter && !IsSpreadAcceptable(symbol))
     {
         PrintFormat("⏸ %s: Spread too high, setup valid but delayed", symbol);
-        EXIT_PROCESS();
+        EndProcessing(index);
+        return;
     }
 
     // ===============================
@@ -1479,9 +1501,6 @@ void ProcessSymbol(const string symbol, const int index)
 
     if(tradeExecuted)
     {
-        // ===============================
-        // 8️⃣ LOCK DAY + RESET STATE
-        // ===============================
         g_symbolLocks[index].Lock();
         ResetBreakoutState(index);
 
@@ -1489,15 +1508,12 @@ void ProcessSymbol(const string symbol, const int index)
     }
     else
     {
-        // ===============================
-        // 9️⃣ FAILED EXECUTION RECOVERY
-        // ===============================
         ResetBreakoutState(index);
 
         PrintFormat("⚠️ %s: Trade failed — breakout reset, will scan again", symbol);
     }
 
-    PROCESS_GUARD_END();
+    EndProcessing(index);
 }
 
 //+------------------------------------------------------------------+
@@ -1773,6 +1789,7 @@ bool ExecuteTrade(const string symbol, const int index, const ENUM_ORDER_TYPE or
         return false; // FAILED - but will still trigger lock to prevent repeated attempts
     }
 }
+
 
 
 
