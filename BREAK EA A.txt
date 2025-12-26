@@ -1,0 +1,603 @@
+//+------------------------------------------------------------------+
+//|                                            BreakoutEA.mq5        |
+//|                                    D1→H4→H1 Breakout Strategy    |
+//+------------------------------------------------------------------+
+#property copyright "Breakout EA 2024"
+#property version   "1.01"
+#property strict
+
+#include <Trade\Trade.mqh>
+#include <Trade\SymbolInfo.mqh>
+#include <Trade\PositionInfo.mqh>
+
+//--- Input Parameters
+input group "=== Core Settings ==="
+input int      InpMagicNumber = 234567;           // Magic Number
+input double   InpRiskPercent = 1.0;              // Risk per trade (%)
+input int      InpMaxTradesPerDay = 1;            // Max trades per day
+
+input group "=== ATR Settings ==="
+input int      InpATRPeriod = 14;                 // ATR Period (H1)
+input double   InpATRStopLoss = 2.0;              // ATR Stop Loss Multiplier
+input double   InpATRTakeProfit = 3.0;            // ATR Take Profit Multiplier
+
+input group "=== Trailing Stop ==="
+input double   InpBEMultiplier = 1.0;             // Breakeven ATR Multiplier
+input double   InpTrailStartMultiplier = 1.5;     // Trail Start ATR Multiplier
+input double   InpTrailStopMultiplier = 0.5;      // Trail Distance ATR Multiplier
+
+input group "=== ADX Filter ==="
+input bool     InpUseADXFilter = true;            // Use ADX Filter
+input int      InpADXPeriod = 14;                 // ADX Period (H4)
+input double   InpMinADX = 25.0;                  // Minimum ADX Value
+
+input group "=== Session Filter ==="
+input bool     InpUseSessionFilter = true;        // Use Session Filter
+input int      InpLondonStart = 8;                // London Start Hour
+input int      InpLondonEnd = 17;                 // London End Hour
+input int      InpNewYorkStart = 13;              // New York Start Hour
+input int      InpNewYorkEnd = 22;                // New York End Hour
+
+input group "=== Spread Filter ==="
+input bool     InpUseSpreadFilter = true;         // Use Spread Filter
+input double   InpMaxSpreadPips = 5.0;            // Max Spread (pips)
+
+//--- Trading State Structure
+struct TradingState {
+    datetime d1Time;                    // Current D1 candle time
+    double previousD1High;              // Previous D1 high level
+    double previousD1Low;               // Previous D1 low level
+    
+    datetime lastCheckedH4Time;         // Last H4 candle we checked for breakout
+    
+    void ResetDaily() {
+        lastCheckedH4Time = 0;
+    }
+    
+    void ResetAll() {
+        d1Time = 0;
+        previousD1High = 0;
+        previousD1Low = 0;
+        ResetDaily();
+    }
+};
+
+//--- Global Variables
+TradingState g_state;
+CTrade g_trade;
+CSymbolInfo g_symbol;
+CPositionInfo g_position;
+
+int g_atrHandle = INVALID_HANDLE;
+int g_adxHandle = INVALID_HANDLE;
+
+double g_atrBuffer[];
+double g_adxBuffer[];
+
+int g_tradesToday = 0;
+datetime g_lastTradeDate = 0;
+
+const string GV_TRADE_COUNT = "BO_TradeCount";
+const string GV_TRADE_DATE = "BO_TradeDate";
+
+//+------------------------------------------------------------------+
+//| Expert initialization function                                   |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+    // Initialize symbol info
+    if(!g_symbol.Name(_Symbol)) {
+        Print("❌ ERROR: Failed to initialize symbol info");
+        return INIT_FAILED;
+    }
+    
+    // Set trade parameters
+    g_trade.SetExpertMagicNumber(InpMagicNumber);
+    g_trade.SetDeviationInPoints(10);
+    g_trade.SetTypeFilling(ORDER_FILLING_FOK);
+    g_trade.SetAsyncMode(false);
+    
+    // Initialize ATR indicator (H1 timeframe)
+    g_atrHandle = iATR(_Symbol, PERIOD_H1, InpATRPeriod);
+    if(g_atrHandle == INVALID_HANDLE) {
+        Print("❌ ERROR: Failed to create ATR indicator");
+        return INIT_FAILED;
+    }
+    
+    // Initialize ADX indicator (H4 timeframe)
+    if(InpUseADXFilter) {
+        g_adxHandle = iADX(_Symbol, PERIOD_H4, InpADXPeriod);
+        if(g_adxHandle == INVALID_HANDLE) {
+            Print("❌ ERROR: Failed to create ADX indicator");
+            return INIT_FAILED;
+        }
+    }
+    
+    // Set buffer as series
+    ArraySetAsSeries(g_atrBuffer, true);
+    ArraySetAsSeries(g_adxBuffer, true);
+    
+    // Initialize state
+    g_state.ResetAll();
+    
+    // Recover daily trade count
+    RecoverDailyTradeCount();
+    
+    Print("✅ EA Initialized Successfully");
+    Print("📊 Symbol: ", _Symbol);
+    Print("🎯 Magic Number: ", InpMagicNumber);
+    Print("💰 Risk per trade: ", InpRiskPercent, "%");
+    Print("📅 Trades today: ", g_tradesToday, "/", InpMaxTradesPerDay);
+    
+    return INIT_SUCCEEDED;
+}
+
+//+------------------------------------------------------------------+
+//| Expert deinitialization function                                 |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+    // Release indicator handles
+    if(g_atrHandle != INVALID_HANDLE)
+        IndicatorRelease(g_atrHandle);
+    if(g_adxHandle != INVALID_HANDLE)
+        IndicatorRelease(g_adxHandle);
+    
+    Print("👋 EA Deinitialized. Reason: ", reason);
+}
+
+//+------------------------------------------------------------------+
+//| Expert tick function                                             |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+    // Step 1: Check for new D1 candle and update levels
+    CheckNewD1Candle();
+    
+    // Step 2: Check if daily limit allows trading
+    if(!CanTradeToday()) {
+        return;
+    }
+    
+    // Step 3: Check for H4 breakout and execute immediately on next H1
+    CheckAndTradeBreakout();
+    
+    // Step 4: Manage open positions
+    ManagePositions();
+}
+
+//+------------------------------------------------------------------+
+//| Check for new D1 candle and mark previous levels                |
+//+------------------------------------------------------------------+
+void CheckNewD1Candle()
+{
+    datetime d1Time = iTime(_Symbol, PERIOD_D1, 0);
+    
+    // Check if we have a new D1 candle
+    if(d1Time != g_state.d1Time) {
+        // Get previous D1 high and low
+        double prevHigh = iHigh(_Symbol, PERIOD_D1, 1);
+        double prevLow = iLow(_Symbol, PERIOD_D1, 1);
+        
+        if(prevHigh > 0 && prevLow > 0) {
+            g_state.d1Time = d1Time;
+            g_state.previousD1High = prevHigh;
+            g_state.previousD1Low = prevLow;
+            g_state.ResetDaily();
+            
+            MqlDateTime tm;
+            TimeToStruct(d1Time, tm);
+            
+            Print("📅 NEW DAY: ", TimeToString(d1Time, TIME_DATE));
+            Print("   Previous D1 High: ", DoubleToString(prevHigh, _Digits));
+            Print("   Previous D1 Low: ", DoubleToString(prevLow, _Digits));
+            Print("   Ready to monitor for breakouts");
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Check for H4 breakout and trade on next H1                       |
+//+------------------------------------------------------------------+
+void CheckAndTradeBreakout()
+{
+    // Need valid D1 levels first
+    if(g_state.previousD1High == 0 || g_state.previousD1Low == 0)
+        return;
+    
+    // Get last CLOSED H4 candle
+    datetime h4Time = iTime(_Symbol, PERIOD_H4, 1);
+    
+    // Skip if we already checked this H4 candle
+    if(h4Time <= g_state.lastCheckedH4Time)
+        return;
+    
+    double h4Close = iClose(_Symbol, PERIOD_H4, 1);
+    if(h4Close == 0)
+        return;
+    
+    ENUM_ORDER_TYPE direction = ORDER_TYPE_BUY;
+    double breakLevel = 0;
+    bool breakoutDetected = false;
+    
+    // Check for bullish breakout
+    if(h4Close > g_state.previousD1High) {
+        direction = ORDER_TYPE_BUY;
+        breakLevel = g_state.previousD1High;
+        breakoutDetected = true;
+        
+        Print("🔥 H4 BREAKOUT UP detected");
+        Print("   H4 Close: ", DoubleToString(h4Close, _Digits));
+        Print("   Break Level: ", DoubleToString(breakLevel, _Digits));
+    }
+    // Check for bearish breakout
+    else if(h4Close < g_state.previousD1Low) {
+        direction = ORDER_TYPE_SELL;
+        breakLevel = g_state.previousD1Low;
+        breakoutDetected = true;
+        
+        Print("🔥 H4 BREAKOUT DOWN detected");
+        Print("   H4 Close: ", DoubleToString(h4Close, _Digits));
+        Print("   Break Level: ", DoubleToString(breakLevel, _Digits));
+    }
+    
+    // Update last checked time
+    g_state.lastCheckedH4Time = h4Time;
+    
+    // If breakout detected, wait for next H1 candle and execute
+    if(breakoutDetected) {
+        // Calculate next H1 candle open time
+        datetime currentH1Time = iTime(_Symbol, PERIOD_H1, 0);
+        datetime nextH1Time = currentH1Time + PeriodSeconds(PERIOD_H1);
+        
+        Print("⏰ Waiting for next H1 candle at: ", TimeToString(nextH1Time, TIME_DATE|TIME_MINUTES));
+        
+        // Wait for the next H1 candle to open
+        while(TimeCurrent() < nextH1Time && !IsStopped()) {
+            Sleep(100); // Sleep briefly to avoid CPU overuse
+        }
+        
+        // Check if we still can trade (in case limit was reached during wait)
+        if(!CanTradeToday()) {
+            Print("🛑 Daily limit reached while waiting");
+            return;
+        }
+        
+        // Execute the trade
+        ExecuteTrade(direction, breakLevel);
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Execute trade                                                     |
+//+------------------------------------------------------------------+
+bool ExecuteTrade(ENUM_ORDER_TYPE direction, double breakLevel)
+{
+    // Final check: Can we trade?
+    if(!CanTradeToday()) {
+        Print("🛑 DAILY LIMIT REACHED: ", g_tradesToday, "/", InpMaxTradesPerDay, " trades");
+        return false;
+    }
+    
+    // Check filters
+    if(!CheckFilters()) {
+        Print("❌ Trade filters not passed");
+        return false;
+    }
+    
+    // Get ATR for position sizing and SL/TP
+    double atr = GetATR();
+    if(atr <= 0) {
+        Print("❌ ERROR: Invalid ATR value");
+        return false;
+    }
+    
+    // Calculate position size
+    double lotSize = CalculateLotSize(atr);
+    if(lotSize <= 0) {
+        Print("❌ ERROR: Invalid lot size calculated");
+        return false;
+    }
+    
+    // Get current price
+    double price = (direction == ORDER_TYPE_BUY) ? g_symbol.Ask() : g_symbol.Bid();
+    
+    // Calculate SL and TP
+    double sl, tp;
+    if(direction == ORDER_TYPE_BUY) {
+        sl = price - (atr * InpATRStopLoss);
+        tp = price + (atr * InpATRTakeProfit);
+    } else {
+        sl = price + (atr * InpATRStopLoss);
+        tp = price - (atr * InpATRTakeProfit);
+    }
+    
+    // Normalize prices
+    sl = NormalizeDouble(sl, _Digits);
+    tp = NormalizeDouble(tp, _Digits);
+    
+    // Create comment
+    string comment = StringFormat("BO_%s_%s", 
+                                  (direction == ORDER_TYPE_BUY) ? "BUY" : "SELL",
+                                  TimeToString(TimeCurrent(), TIME_DATE));
+    
+    Print("✅ ENTERING TRADE at H1 open");
+    Print("   Direction: ", (direction == ORDER_TYPE_BUY) ? "BUY" : "SELL");
+    Print("   Lot Size: ", DoubleToString(lotSize, 2));
+    Print("   Entry: ", DoubleToString(price, _Digits));
+    Print("   SL: ", DoubleToString(sl, _Digits), " (", DoubleToString(MathAbs(price - sl) / _Point, 1), " points)");
+    Print("   TP: ", DoubleToString(tp, _Digits), " (", DoubleToString(MathAbs(tp - price) / _Point, 1), " points)");
+    Print("   ATR: ", DoubleToString(atr, _Digits));
+    
+    // Execute trade
+    bool result = false;
+    if(direction == ORDER_TYPE_BUY) {
+        result = g_trade.Buy(lotSize, _Symbol, price, sl, tp, comment);
+    } else {
+        result = g_trade.Sell(lotSize, _Symbol, price, sl, tp, comment);
+    }
+    
+    if(result) {
+        Print("📊 Trade executed successfully!");
+        Print("   Ticket: ", g_trade.ResultOrder());
+        IncrementTradeCount();
+        return true;
+    } else {
+        Print("❌ Trade execution failed!");
+        Print("   Error: ", GetLastError());
+        Print("   Return code: ", g_trade.ResultRetcode());
+        Print("   Comment: ", g_trade.ResultRetcodeDescription());
+        return false;
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Manage open positions (trailing stop)                            |
+//+------------------------------------------------------------------+
+void ManagePositions()
+{
+    for(int i = PositionsTotal() - 1; i >= 0; i--) {
+        if(!g_position.SelectByIndex(i))
+            continue;
+        
+        if(g_position.Symbol() != _Symbol || g_position.Magic() != InpMagicNumber)
+            continue;
+        
+        double atr = GetATR();
+        if(atr <= 0)
+            continue;
+        
+        double entryPrice = g_position.PriceOpen();
+        double currentSL = g_position.StopLoss();
+        double currentPrice = (g_position.Type() == POSITION_TYPE_BUY) ? 
+                              g_symbol.Bid() : g_symbol.Ask();
+        
+        double profit = (g_position.Type() == POSITION_TYPE_BUY) ? 
+                        (currentPrice - entryPrice) : (entryPrice - currentPrice);
+        
+        double newSL = currentSL;
+        bool updateSL = false;
+        
+        // Move to breakeven
+        if(profit >= atr * InpBEMultiplier) {
+            if(g_position.Type() == POSITION_TYPE_BUY) {
+                if(currentSL < entryPrice) {
+                    newSL = entryPrice;
+                    updateSL = true;
+                    Print("🔒 Moving to BREAKEVEN for ticket ", g_position.Ticket());
+                }
+            } else {
+                if(currentSL > entryPrice || currentSL == 0) {
+                    newSL = entryPrice;
+                    updateSL = true;
+                    Print("🔒 Moving to BREAKEVEN for ticket ", g_position.Ticket());
+                }
+            }
+        }
+        
+        // Start trailing
+        if(profit >= atr * InpTrailStartMultiplier) {
+            if(g_position.Type() == POSITION_TYPE_BUY) {
+                double trailSL = currentPrice - (atr * InpTrailStopMultiplier);
+                if(trailSL > currentSL && trailSL > entryPrice) {
+                    newSL = trailSL;
+                    updateSL = true;
+                    Print("📈 Trailing stop for ticket ", g_position.Ticket());
+                }
+            } else {
+                double trailSL = currentPrice + (atr * InpTrailStopMultiplier);
+                if(trailSL < currentSL || currentSL == 0) {
+                    if(trailSL < entryPrice) {
+                        newSL = trailSL;
+                        updateSL = true;
+                        Print("📉 Trailing stop for ticket ", g_position.Ticket());
+                    }
+                }
+            }
+        }
+        
+        // Update SL if needed
+        if(updateSL) {
+            newSL = NormalizeDouble(newSL, _Digits);
+            if(g_trade.PositionModify(g_position.Ticket(), newSL, g_position.TakeProfit())) {
+                Print("   New SL: ", DoubleToString(newSL, _Digits));
+            } else {
+                Print("❌ Failed to modify SL. Error: ", GetLastError());
+            }
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Get ATR value                                                     |
+//+------------------------------------------------------------------+
+double GetATR()
+{
+    if(CopyBuffer(g_atrHandle, 0, 0, 2, g_atrBuffer) <= 0) {
+        Print("❌ ERROR: Failed to copy ATR buffer");
+        return 0;
+    }
+    return g_atrBuffer[0];
+}
+
+//+------------------------------------------------------------------+
+//| Get ADX value                                                     |
+//+------------------------------------------------------------------+
+double GetADX()
+{
+    if(g_adxHandle == INVALID_HANDLE)
+        return 0;
+    
+    if(CopyBuffer(g_adxHandle, 0, 0, 2, g_adxBuffer) <= 0) {
+        Print("❌ ERROR: Failed to copy ADX buffer");
+        return 0;
+    }
+    return g_adxBuffer[0];
+}
+
+//+------------------------------------------------------------------+
+//| Check if we can trade today                                      |
+//+------------------------------------------------------------------+
+bool CanTradeToday()
+{
+    datetime todayKey = TodayKey();
+    
+    // Check if new day
+    if(todayKey != g_lastTradeDate) {
+        g_tradesToday = 0;
+        g_lastTradeDate = todayKey;
+        GlobalVariableSet(GV_TRADE_COUNT, 0);
+        GlobalVariableSet(GV_TRADE_DATE, (double)todayKey);
+    }
+    
+    return (g_tradesToday < InpMaxTradesPerDay);
+}
+
+//+------------------------------------------------------------------+
+//| Increment trade count                                            |
+//+------------------------------------------------------------------+
+void IncrementTradeCount()
+{
+    g_tradesToday++;
+    GlobalVariableSet(GV_TRADE_COUNT, g_tradesToday);
+    Print("📊 Trade count updated: ", g_tradesToday, "/", InpMaxTradesPerDay);
+}
+
+//+------------------------------------------------------------------+
+//| Recover daily trade count from GlobalVariables                   |
+//+------------------------------------------------------------------+
+void RecoverDailyTradeCount()
+{
+    datetime todayKey = TodayKey();
+    
+    if(GlobalVariableCheck(GV_TRADE_DATE)) {
+        datetime storedDate = (datetime)GlobalVariableGet(GV_TRADE_DATE);
+        
+        if(storedDate == todayKey && GlobalVariableCheck(GV_TRADE_COUNT)) {
+            g_tradesToday = (int)GlobalVariableGet(GV_TRADE_COUNT);
+            g_lastTradeDate = todayKey;
+            Print("♻️ Recovered trade count: ", g_tradesToday, "/", InpMaxTradesPerDay);
+        } else {
+            // New day, reset
+            g_tradesToday = 0;
+            g_lastTradeDate = todayKey;
+            GlobalVariableSet(GV_TRADE_COUNT, 0);
+            GlobalVariableSet(GV_TRADE_DATE, (double)todayKey);
+            Print("🆕 New trading day started");
+        }
+    } else {
+        // First run
+        g_tradesToday = 0;
+        g_lastTradeDate = todayKey;
+        GlobalVariableSet(GV_TRADE_COUNT, 0);
+        GlobalVariableSet(GV_TRADE_DATE, (double)todayKey);
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Get today's date key (midnight)                                  |
+//+------------------------------------------------------------------+
+datetime TodayKey()
+{
+    MqlDateTime tm;
+    TimeToStruct(TimeCurrent(), tm);
+    tm.hour = 0;
+    tm.min = 0;
+    tm.sec = 0;
+    return StructToTime(tm);
+}
+
+//+------------------------------------------------------------------+
+//| Check all filters                                                |
+//+------------------------------------------------------------------+
+bool CheckFilters()
+{
+    // ADX Filter
+    if(InpUseADXFilter) {
+        double adx = GetADX();
+        if(adx < InpMinADX) {
+            Print("   ADX filter failed: ", DoubleToString(adx, 2), " < ", InpMinADX);
+            return false;
+        }
+        Print("   ✓ ADX: ", DoubleToString(adx, 2));
+    }
+    
+    // Session Filter
+    if(InpUseSessionFilter) {
+        MqlDateTime tm;
+        TimeToStruct(TimeCurrent(), tm);
+        int hour = tm.hour;
+        
+        bool inSession = false;
+        if((hour >= InpLondonStart && hour < InpLondonEnd) ||
+           (hour >= InpNewYorkStart && hour < InpNewYorkEnd)) {
+            inSession = true;
+        }
+        
+        if(!inSession) {
+            Print("   Session filter failed: Outside trading hours");
+            return false;
+        }
+        Print("   ✓ Session: Active");
+    }
+    
+    // Spread Filter
+    if(InpUseSpreadFilter) {
+        double spread = (g_symbol.Ask() - g_symbol.Bid()) / _Point / 10.0; // pips
+        if(spread > InpMaxSpreadPips) {
+            Print("   Spread filter failed: ", DoubleToString(spread, 1), " > ", InpMaxSpreadPips);
+            return false;
+        }
+        Print("   ✓ Spread: ", DoubleToString(spread, 1), " pips");
+    }
+    
+    return true;
+}
+
+//+------------------------------------------------------------------+
+//| Calculate lot size based on risk                                 |
+//+------------------------------------------------------------------+
+double CalculateLotSize(double atr)
+{
+    double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+    double riskAmount = balance * (InpRiskPercent / 100.0);
+    
+    // Calculate SL distance in account currency
+    double slDistance = atr * InpATRStopLoss;
+    double tickValue = g_symbol.TickValue();
+    double tickSize = g_symbol.TickSize();
+    
+    // Calculate lot size
+    double lotSize = riskAmount / (slDistance / tickSize * tickValue);
+    
+    // Normalize to symbol requirements
+    double minLot = g_symbol.LotsMin();
+    double maxLot = g_symbol.LotsMax();
+    double lotStep = g_symbol.LotsStep();
+    
+    lotSize = MathFloor(lotSize / lotStep) * lotStep;
+    lotSize = MathMax(minLot, MathMin(maxLot, lotSize));
+    
+    return lotSize;
+}
+//+------------------------------------------------------------------+
