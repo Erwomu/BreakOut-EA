@@ -1433,7 +1433,7 @@ inline void EndProcessing(const int index)
 }
 
 //+------------------------------------------------------------------+
-//| UPDATED: ProcessSymbol() - Now 3 steps instead of 4              |
+//| UPDATED: ProcessSymbol() - Remove duplicate lock                 |
 //+------------------------------------------------------------------+
 void ProcessSymbol(const string symbol, const int index)
 {
@@ -1469,7 +1469,7 @@ void ProcessSymbol(const string symbol, const int index)
     }
     
     // ========================================
-    // 4️⃣ STEP 1: CHECK H4 BREAKOUT (of D1 levels)
+    // 4️⃣ STEP 1: CHECK H4 BREAKOUT (Locks immediately if found)
     // ========================================
     if(!CheckH4Breakout(symbol, index))
     {
@@ -1500,8 +1500,7 @@ void ProcessSymbol(const string symbol, const int index)
     // ========================================
     if(UseSpreadFilter && !IsSpreadAcceptable(symbol))
     {
-        PrintFormat("⚠️ %s: All conditions met but spread too high - LOCKING anyway", symbol);
-        g_symbolLocks[index].Lock();
+        PrintFormat("⚠️ %s: All conditions met but spread too high", symbol);
         g_htfData[index].d1BreakoutDetected = false;
         g_htfData[index].h4ConfirmationReceived = false;
         g_htfData[index].h1PatternConfirmed = false;
@@ -1510,13 +1509,7 @@ void ProcessSymbol(const string symbol, const int index)
     }
     
     // ========================================
-    // 8️⃣ LOCK SYMBOL (All 3 steps completed)
-    // ========================================
-    PrintFormat("🔒 %s: H4→H1→H1Open all confirmed - LOCKING", symbol);
-    g_symbolLocks[index].Lock();
-    
-    // ========================================
-    // 9️⃣ EXECUTE TRADE
+    // 8️⃣ EXECUTE TRADE (Lock already set at H4 breakout)
     // ========================================
     bool tradeExecuted = ExecuteTrade(symbol, index, g_htfData[index].pendingDirection, g_htfData[index].breakLevel);
     
@@ -1526,11 +1519,11 @@ void ProcessSymbol(const string symbol, const int index)
     }
     else
     {
-        PrintFormat("⚠️ %s: Trade failed but setup was valid - day consumed", symbol);
+        PrintFormat("⚠️ %s: Trade failed but already locked", symbol);
     }
     
     // ========================================
-    // 🔟 RESET STATE FLAGS
+    // 9️⃣ RESET STATE FLAGS
     // ========================================
     g_htfData[index].d1BreakoutDetected = false;
     g_htfData[index].h4ConfirmationReceived = false;
@@ -1645,7 +1638,7 @@ void DrawHTFLevels(const string symbol, const int index)
 
 
 //+------------------------------------------------------------------+
-//| NEW FUNCTION 1: Check H4 Breakout (Directly from D1 Levels)      |
+//| REPLACE CheckH4Breakout() with this version                      |
 //+------------------------------------------------------------------+
 bool CheckH4Breakout(const string symbol, const int index)
 {
@@ -1670,14 +1663,18 @@ bool CheckH4Breakout(const string symbol, const int index)
     // Check BREAKOUT UP (H4 closes above previous D1 high)
     if(h4Close > g_htfData[index].high)
     {
+        // 🔒 LOCK IMMEDIATELY - BEFORE setting any flags
+        g_symbolLocks[index].Lock();
+        
         g_htfData[index].d1BreakoutDetected = true;
         g_htfData[index].d1BreakoutTime = h4Time;
         g_htfData[index].breakoutUp = true;
         g_htfData[index].pendingDirection = ORDER_TYPE_BUY;
         g_htfData[index].breakLevel = g_htfData[index].high;
-        g_htfData[index].h4ConfirmationReceived = true; // Mark H4 confirmed immediately
+        g_htfData[index].h4ConfirmationReceived = true;
         
         Print("┌────────────────────────────────────────┐");
+        PrintFormat("│  🔒 LOCKED: %s (H4 breakout UP)", symbol);
         PrintFormat("│  STEP 1/3: H4 BREAKOUT UP - %s", symbol);
         PrintFormat("│  H4 Close: %.5f", h4Close);
         PrintFormat("│  Prev D1 High: %.5f", g_htfData[index].high);
@@ -1690,14 +1687,18 @@ bool CheckH4Breakout(const string symbol, const int index)
     // Check BREAKOUT DOWN (H4 closes below previous D1 low)
     if(h4Close < g_htfData[index].low)
     {
+        // 🔒 LOCK IMMEDIATELY - BEFORE setting any flags
+        g_symbolLocks[index].Lock();
+        
         g_htfData[index].d1BreakoutDetected = true;
         g_htfData[index].d1BreakoutTime = h4Time;
         g_htfData[index].breakoutDown = true;
         g_htfData[index].pendingDirection = ORDER_TYPE_SELL;
         g_htfData[index].breakLevel = g_htfData[index].low;
-        g_htfData[index].h4ConfirmationReceived = true; // Mark H4 confirmed immediately
+        g_htfData[index].h4ConfirmationReceived = true;
         
         Print("┌────────────────────────────────────────┐");
+        PrintFormat("│  🔒 LOCKED: %s (H4 breakout DOWN)", symbol);
         PrintFormat("│  STEP 1/3: H4 BREAKOUT DOWN - %s", symbol);
         PrintFormat("│  H4 Close: %.5f", h4Close);
         PrintFormat("│  Prev D1 Low: %.5f", g_htfData[index].low);
@@ -1711,19 +1712,26 @@ bool CheckH4Breakout(const string symbol, const int index)
 }
 
 //+------------------------------------------------------------------+
-//| UPDATED: CheckH1PatternAndSetEntry()                             |
+//| ADDITIONAL SAFETY: Check lock at start of every function         |
 //+------------------------------------------------------------------+
 bool CheckH1PatternAndSetEntry(const string symbol, const int index)
 {
-    // Must have H4 breakout detected (d1BreakoutDetected flag is reused)
+    // SAFETY CHECK: Don't process if already locked
+    if(g_symbolLocks[index].isLocked)
+    {
+        PrintFormat("⚠️ %s: Already locked, skipping H1 pattern check", symbol);
+        return false;
+    }
+    
+    // Must have H4 breakout detected
     if(!g_htfData[index].d1BreakoutDetected)
         return false;
     
     // Already found pattern and set entry time
     if(g_htfData[index].h1PatternConfirmed)
-        return true; // Pattern already confirmed, move to next step
+        return true;
     
-    // Get current H1 time using iTime
+    // Get current H1 time
     datetime currentH1Time = iTime(symbol, PERIOD_H1, 0);
     if(currentH1Time == 0)
         return false;
@@ -1732,13 +1740,13 @@ bool CheckH1PatternAndSetEntry(const string symbol, const int index)
     if(currentH1Time == g_htfData[index].h1PatternTime)
         return false;
     
-    // Get H1 pattern from CLOSED candles (your PricePosition function)
+    // Get H1 pattern from CLOSED candles
     RejectionSignal signal = PricePosition(symbol, g_htfData[index].breakLevel);
     
     // Check ADX filter
     if(!CheckADXFilter(symbol, index))
     {
-        g_htfData[index].h1PatternTime = currentH1Time; // Mark as checked
+        g_htfData[index].h1PatternTime = currentH1Time;
         return false;
     }
     
@@ -1770,14 +1778,11 @@ bool CheckH1PatternAndSetEntry(const string symbol, const int index)
         Print("└────────────────────────────────────────┘");
     }
     
-    // Update checked time
     g_htfData[index].h1PatternTime = currentH1Time;
     
     if(patternFound)
     {
         g_htfData[index].h1PatternConfirmed = true;
-        
-        // Calculate NEXT H1 open time (entry time)
         g_htfData[index].entryH1Time = currentH1Time + PeriodSeconds(PERIOD_H1);
         
         PrintFormat("│  ⏰ Entry scheduled at NEXT H1 open: %s", 
@@ -1790,16 +1795,23 @@ bool CheckH1PatternAndSetEntry(const string symbol, const int index)
 }
 
 //+------------------------------------------------------------------+
-//| UPDATED: IsReadyToEnter() - Now Step 3/3 instead of 4/4          |
+//| ADDITIONAL SAFETY: Check lock before entry                       |
 //+------------------------------------------------------------------+
 bool IsReadyToEnter(const string symbol, const int index)
 {
+    // SAFETY CHECK: Don't process if already locked
+    if(g_symbolLocks[index].isLocked)
+    {
+        PrintFormat("⚠️ %s: Already locked, skipping entry check", symbol);
+        return false;
+    }
+    
     // All conditions must be met
     if(!g_htfData[index].d1BreakoutDetected || 
        !g_htfData[index].h1PatternConfirmed)
         return false;
     
-    // Get current H1 open time using iTime
+    // Get current H1 open time
     datetime currentH1Time = iTime(symbol, PERIOD_H1, 0);
     if(currentH1Time == 0)
         return false;
@@ -1816,8 +1828,8 @@ bool IsReadyToEnter(const string symbol, const int index)
     }
     
     // Still waiting for next H1
-    static datetime lastLog[6]; // Adjust size if you have different number of symbols
-    if(TimeCurrent() - lastLog[index] > 300) // Log every 5 minutes
+    static datetime lastLog[6];
+    if(TimeCurrent() - lastLog[index] > 300)
     {
         PrintFormat("⏳ %s: Waiting for H1 open at %s (Current: %s)", 
                    symbol, 
@@ -1920,6 +1932,7 @@ bool ExecuteTrade(const string symbol, const int index, const ENUM_ORDER_TYPE or
         return false; // FAILED - but will still trigger lock to prevent repeated attempts
     }
 }
+
 
 
 
