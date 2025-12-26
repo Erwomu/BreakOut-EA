@@ -294,6 +294,7 @@ struct HTFData
     datetime h1PatternTime;         // When pattern was found
     datetime entryH1Time;           // The H1 candle open time to enter at
     ENUM_ORDER_TYPE pendingDirection; // Which way to trade
+   ENUM_ORDER_TYPE lockedDirection; // NEW: Which direction was locked
     
     void Reset()
     {
@@ -312,6 +313,7 @@ struct HTFData
         h1PatternConfirmed = false;
         h1PatternTime = 0;
         entryH1Time = 0;
+     lockedDirection = -1; // Reset to invalid
     }
     
     HTFData() { Reset(); }
@@ -1433,74 +1435,58 @@ inline void EndProcessing(const int index)
 }
 
 //+------------------------------------------------------------------+
-//| UPDATED: ProcessSymbol() - Remove duplicate lock                 |
+//| Updated ProcessSymbol - Call separate entry functions            |
 //+------------------------------------------------------------------+
 void ProcessSymbol(const string symbol, const int index)
 {
-    // ========================================
-    // 0️⃣ DAILY LOCK CHECK
-    // ========================================
+    // Lock check
     if(!g_symbolLocks[index].CanTrade())
         return;
     
     g_symbolLocks[index].SetProcessing(true);
     
-    // ========================================
-    // 1️⃣ SESSION FILTER
-    // ========================================
+    // Session filter
     if(UseSessionFilter && !IsInTradingSession())
     {
         g_symbolLocks[index].SetProcessing(false);
         return;
     }
     
-    // ========================================
-    // 2️⃣ MANAGE EXISTING POSITIONS
-    // ========================================
+    // Manage positions
     ManagePositions(symbol, index);
     
-    // ========================================
-    // 3️⃣ POSITION LIMITS
-    // ========================================
+    // Position limits
     if(GetSymbolPositionsCount(symbol) > 0 || GetAllPositionsCount() >= MaxTotalPositions)
     {
         g_symbolLocks[index].SetProcessing(false);
         return;
     }
     
-    // ========================================
-    // 4️⃣ STEP 1: CHECK H4 BREAKOUT (Locks immediately if found)
-    // ========================================
+    // Step 1: H4 breakout
     if(!CheckH4Breakout(symbol, index))
     {
         g_symbolLocks[index].SetProcessing(false);
-        return; // No H4 breakout yet
+        return;
     }
     
-    // ========================================
-    // 5️⃣ STEP 2: CHECK H1 PATTERN & SET ENTRY TIME
-    // ========================================
+    // Step 2: H1 pattern
     if(!CheckH1PatternAndSetEntry(symbol, index))
     {
         g_symbolLocks[index].SetProcessing(false);
-        return; // Pattern not found yet
+        return;
     }
     
-    // ========================================
-    // 6️⃣ STEP 3: CHECK IF READY TO ENTER (at H1 open)
-    // ========================================
+    // Step 3: Ready to enter (locks here)
     if(!IsReadyToEnter(symbol, index))
     {
         g_symbolLocks[index].SetProcessing(false);
-        return; // Not at entry H1 yet
+        return;
     }
     
-    // ========================================
-    // 7️⃣ SPREAD FILTER (final check before entry)
-    // ========================================
+    // Spread filter
     if(UseSpreadFilter && !IsSpreadAcceptable(symbol))
     {
-        PrintFormat("⚠️ %s: All conditions met but spread too high", symbol);
+        PrintFormat("⚠️ %s: Spread too high - setup consumed", symbol);
         g_htfData[index].d1BreakoutDetected = false;
         g_htfData[index].h4ConfirmationReceived = false;
         g_htfData[index].h1PatternConfirmed = false;
@@ -1508,23 +1494,28 @@ void ProcessSymbol(const string symbol, const int index)
         return;
     }
     
-    // ========================================
-    // 8️⃣ EXECUTE TRADE (Lock already set at H4 breakout)
-    // ========================================
-    bool tradeExecuted = ExecuteTrade(symbol, index, g_htfData[index].pendingDirection, g_htfData[index].breakLevel);
+    // Execute trade - Call separate function based on direction
+    bool tradeExecuted = false;
+    
+    if(g_htfData[index].pendingDirection == ORDER_TYPE_BUY)
+    {
+        tradeExecuted = ExecuteTradeBuy(symbol, index, g_htfData[index].breakLevel);
+    }
+    else if(g_htfData[index].pendingDirection == ORDER_TYPE_SELL)
+    {
+        tradeExecuted = ExecuteTradeSell(symbol, index, g_htfData[index].breakLevel);
+    }
     
     if(tradeExecuted)
     {
-        PrintFormat("✅ %s: Trade executed successfully at H1 open", symbol);
+        PrintFormat("✅ %s: Trade executed successfully", symbol);
     }
     else
     {
-        PrintFormat("⚠️ %s: Trade failed but already locked", symbol);
+        PrintFormat("⚠️ %s: Trade failed but setup consumed", symbol);
     }
     
-    // ========================================
-    // 9️⃣ RESET STATE FLAGS
-    // ========================================
+    // Reset flags
     g_htfData[index].d1BreakoutDetected = false;
     g_htfData[index].h4ConfirmationReceived = false;
     g_htfData[index].h1PatternConfirmed = false;
@@ -1638,13 +1629,16 @@ void DrawHTFLevels(const string symbol, const int index)
 
 
 //+------------------------------------------------------------------+
-//| REPLACE CheckH4Breakout() with this version                      |
+//| Step 2: REVERT CheckH4Breakout - DON'T lock here                 |
 //+------------------------------------------------------------------+
 bool CheckH4Breakout(const string symbol, const int index)
 {
     // If already detected H4 breakout today, skip
     if(g_htfData[index].d1BreakoutDetected)
-        return true; // Already detected, move to next step
+    {
+        // Already locked in one direction, don't check opposite
+        return true;
+    }
     
     // Get the LAST CLOSED H4 candle
     double h4Close = iClose(symbol, PERIOD_H4, 1);
@@ -1657,28 +1651,25 @@ bool CheckH4Breakout(const string symbol, const int index)
     if(h4Time <= g_htfData[index].h4ConfirmationTime)
         return false;
     
-    // Update last checked time (even if no breakout)
+    // Update last checked time
     g_htfData[index].h4ConfirmationTime = h4Time;
     
     // Check BREAKOUT UP (H4 closes above previous D1 high)
     if(h4Close > g_htfData[index].high)
     {
-        // 🔒 LOCK IMMEDIATELY - BEFORE setting any flags
-        g_symbolLocks[index].Lock();
-        
         g_htfData[index].d1BreakoutDetected = true;
         g_htfData[index].d1BreakoutTime = h4Time;
         g_htfData[index].breakoutUp = true;
         g_htfData[index].pendingDirection = ORDER_TYPE_BUY;
+        g_htfData[index].lockedDirection = ORDER_TYPE_BUY; // Lock direction
         g_htfData[index].breakLevel = g_htfData[index].high;
         g_htfData[index].h4ConfirmationReceived = true;
         
         Print("┌────────────────────────────────────────┐");
-        PrintFormat("│  🔒 LOCKED: %s (H4 breakout UP)", symbol);
         PrintFormat("│  STEP 1/3: H4 BREAKOUT UP - %s", symbol);
         PrintFormat("│  H4 Close: %.5f", h4Close);
         PrintFormat("│  Prev D1 High: %.5f", g_htfData[index].high);
-        PrintFormat("│  H4 Time: %s", TimeToString(h4Time, TIME_MINUTES));
+        PrintFormat("│  Direction LOCKED: BUY only");
         PrintFormat("│  ⏳ Waiting for H1 bullish pattern...");
         Print("└────────────────────────────────────────┘");
         return true;
@@ -1687,22 +1678,19 @@ bool CheckH4Breakout(const string symbol, const int index)
     // Check BREAKOUT DOWN (H4 closes below previous D1 low)
     if(h4Close < g_htfData[index].low)
     {
-        // 🔒 LOCK IMMEDIATELY - BEFORE setting any flags
-        g_symbolLocks[index].Lock();
-        
         g_htfData[index].d1BreakoutDetected = true;
         g_htfData[index].d1BreakoutTime = h4Time;
         g_htfData[index].breakoutDown = true;
         g_htfData[index].pendingDirection = ORDER_TYPE_SELL;
+        g_htfData[index].lockedDirection = ORDER_TYPE_SELL; // Lock direction
         g_htfData[index].breakLevel = g_htfData[index].low;
         g_htfData[index].h4ConfirmationReceived = true;
         
         Print("┌────────────────────────────────────────┐");
-        PrintFormat("│  🔒 LOCKED: %s (H4 breakout DOWN)", symbol);
         PrintFormat("│  STEP 1/3: H4 BREAKOUT DOWN - %s", symbol);
         PrintFormat("│  H4 Close: %.5f", h4Close);
         PrintFormat("│  Prev D1 Low: %.5f", g_htfData[index].low);
-        PrintFormat("│  H4 Time: %s", TimeToString(h4Time, TIME_MINUTES));
+        PrintFormat("│  Direction LOCKED: SELL only");
         PrintFormat("│  ⏳ Waiting for H1 bearish pattern...");
         Print("└────────────────────────────────────────┘");
         return true;
@@ -1795,17 +1783,10 @@ bool CheckH1PatternAndSetEntry(const string symbol, const int index)
 }
 
 //+------------------------------------------------------------------+
-//| ADDITIONAL SAFETY: Check lock before entry                       |
+//| Step 3: Lock when ready to enter (not before)                    |
 //+------------------------------------------------------------------+
 bool IsReadyToEnter(const string symbol, const int index)
 {
-    // SAFETY CHECK: Don't process if already locked
-    if(g_symbolLocks[index].isLocked)
-    {
-        PrintFormat("⚠️ %s: Already locked, skipping entry check", symbol);
-        return false;
-    }
-    
     // All conditions must be met
     if(!g_htfData[index].d1BreakoutDetected || 
        !g_htfData[index].h1PatternConfirmed)
@@ -1819,6 +1800,13 @@ bool IsReadyToEnter(const string symbol, const int index)
     // Check if we've reached the scheduled entry time
     if(currentH1Time >= g_htfData[index].entryH1Time)
     {
+        // 🔒 LOCK NOW - Right before entry
+        if(!g_symbolLocks[index].isLocked)
+        {
+            g_symbolLocks[index].Lock();
+            PrintFormat("🔒 %s: LOCKED before entry attempt", symbol);
+        }
+        
         Print("┌────────────────────────────────────────┐");
         PrintFormat("│  STEP 3/3: READY TO ENTER - %s", symbol);
         PrintFormat("│  Current H1: %s", TimeToString(currentH1Time, TIME_MINUTES));
@@ -1827,7 +1815,7 @@ bool IsReadyToEnter(const string symbol, const int index)
         return true;
     }
     
-    // Still waiting for next H1
+    // Still waiting
     static datetime lastLog[6];
     if(TimeCurrent() - lastLog[index] > 300)
     {
@@ -1842,9 +1830,9 @@ bool IsReadyToEnter(const string symbol, const int index)
 }
 
 //+------------------------------------------------------------------+
-//| Execute Trade - Returns TRUE only if trade succeeds              |
+//| Step 4: Separate BUY and SELL execution logic                    |
 //+------------------------------------------------------------------+
-bool ExecuteTrade(const string symbol, const int index, const ENUM_ORDER_TYPE orderType, const double breakLevel)
+bool ExecuteTradeBuy(const string symbol, const int index, const double breakLevel)
 {
     if(!g_eaSymbolInfo.Name(symbol))
     {
@@ -1854,7 +1842,7 @@ bool ExecuteTrade(const string symbol, const int index, const ENUM_ORDER_TYPE or
     
     g_eaSymbolInfo.RefreshRates();
     
-    // Get ATR for position sizing
+    // Get ATR
     double atr = GetATRValue(index);
     if(atr <= 0)
     {
@@ -1871,32 +1859,18 @@ bool ExecuteTrade(const string symbol, const int index, const ENUM_ORDER_TYPE or
         return false;
     }
     
-    // Calculate entry price, SL, and TP
-    double price, sl, tp;
-    string direction;
+    // BUY calculation
+    double price = g_eaSymbolInfo.Ask();
+    double sl = NormalizeDouble(price - (atr * ATRStopLoss), g_eaSymbolInfo.Digits());
+    double tp = NormalizeDouble(price + (atr * ATRTakeProfit), g_eaSymbolInfo.Digits());
     
-    if(orderType == ORDER_TYPE_BUY)
-    {
-        direction = "BUY";
-        price = g_eaSymbolInfo.Ask();
-        sl = NormalizeDouble(price - (atr * ATRStopLoss), g_eaSymbolInfo.Digits());
-        tp = NormalizeDouble(price + (atr * ATRTakeProfit), g_eaSymbolInfo.Digits());
-    }
-    else
-    {
-        direction = "SELL";
-        price = g_eaSymbolInfo.Bid();
-        sl = NormalizeDouble(price + (atr * ATRStopLoss), g_eaSymbolInfo.Digits());
-        tp = NormalizeDouble(price - (atr * ATRTakeProfit), g_eaSymbolInfo.Digits());
-    }
-    
-    // Create trade comment with date
+    // Create trade comment
     datetime currentD1 = iTime(symbol, PERIOD_D1, 0);
     string dateStr = TimeToString(currentD1, TIME_DATE);
-    string tradeComment = StringFormat("BO_%s_%s", direction, dateStr);
+    string tradeComment = StringFormat("BO_BUY_%s", dateStr);
     
-    // Execute trade
-    bool result = g_eaTrade.PositionOpen(symbol, orderType, lotSize, price, sl, tp, tradeComment);
+    // Execute BUY
+    bool result = g_eaTrade.PositionOpen(symbol, ORDER_TYPE_BUY, lotSize, price, sl, tp, tradeComment);
     
     if(result && g_eaTrade.ResultRetcode() == TRADE_RETCODE_DONE)
     {
@@ -1905,34 +1879,103 @@ bool ExecuteTrade(const string symbol, const int index, const ENUM_ORDER_TYPE or
         double rewardPips = MathAbs(tp - price) / g_eaSymbolInfo.Point() / 10;
         
         Print("┌────────────────────────────────────────┐");
-        PrintFormat("│  ✅ TRADE EXECUTED: %s %s", symbol, direction);
+        PrintFormat("│  ✅ BUY EXECUTED: %s", symbol);
         PrintFormat("│     Ticket: #%I64u", ticket);
         PrintFormat("│     Date: %s", dateStr);
         PrintFormat("│     Lot Size: %.2f", lotSize);
-        PrintFormat("│     Entry: %.5f", price);
+        PrintFormat("│     Entry: %.5f (ASK)", price);
         PrintFormat("│     Stop Loss: %.5f (%.1f pips)", sl, riskPips);
         PrintFormat("│     Take Profit: %.5f (%.1f pips)", tp, rewardPips);
         PrintFormat("│     Risk/Reward: 1:%.1f", rewardPips/riskPips);
-        PrintFormat("│     Comment: %s", tradeComment);
         Print("└────────────────────────────────────────┘");
         
-        // Update statistics
         g_stats[index].totalTrades++;
         g_stats[index].lastTradeTime = TimeCurrent();
         
-        return true; // SUCCESS - will trigger lock
+        return true;
     }
     else
     {
-        PrintFormat("❌ TRADE FAILED: %s %s", symbol, direction);
+        PrintFormat("❌ BUY FAILED: %s", symbol);
         PrintFormat("   Retcode: %d (%s)", 
                    g_eaTrade.ResultRetcode(), 
                    g_eaTrade.ResultRetcodeDescription());
+        return false;
+    }
+} 
+
+//+------------------------------------------------------------------+
+//| Separate SELL execution logic                                    |
+//+------------------------------------------------------------------+
+bool ExecuteTradeSell(const string symbol, const int index, const double breakLevel)
+{
+    if(!g_eaSymbolInfo.Name(symbol))
+    {
+        PrintFormat("❌ %s: Failed to get symbol info", symbol);
+        return false;
+    }
+    
+    g_eaSymbolInfo.RefreshRates();
+    
+    // Get ATR
+    double atr = GetATRValue(index);
+    if(atr <= 0)
+    {
+        PrintFormat("❌ %s: Invalid ATR value", symbol);
+        return false;
+    }
+    
+    // Calculate lot size
+    double lotSize = CalculateLotSize(symbol, index, atr);
+    if(lotSize < g_eaSymbolInfo.LotsMin())
+    {
+        PrintFormat("❌ %s: Lot size %.2f below minimum %.2f", 
+                   symbol, lotSize, g_eaSymbolInfo.LotsMin());
+        return false;
+    }
+    
+    // SELL calculation
+    double price = g_eaSymbolInfo.Bid();
+    double sl = NormalizeDouble(price + (atr * ATRStopLoss), g_eaSymbolInfo.Digits());
+    double tp = NormalizeDouble(price - (atr * ATRTakeProfit), g_eaSymbolInfo.Digits());
+    
+    // Create trade comment
+    datetime currentD1 = iTime(symbol, PERIOD_D1, 0);
+    string dateStr = TimeToString(currentD1, TIME_DATE);
+    string tradeComment = StringFormat("BO_SELL_%s", dateStr);
+    
+    // Execute SELL
+    bool result = g_eaTrade.PositionOpen(symbol, ORDER_TYPE_SELL, lotSize, price, sl, tp, tradeComment);
+    
+    if(result && g_eaTrade.ResultRetcode() == TRADE_RETCODE_DONE)
+    {
+        ulong ticket = g_eaTrade.ResultOrder();
+        double riskPips = MathAbs(sl - price) / g_eaSymbolInfo.Point() / 10;
+        double rewardPips = MathAbs(price - tp) / g_eaSymbolInfo.Point() / 10;
         
-        return false; // FAILED - but will still trigger lock to prevent repeated attempts
+        Print("┌────────────────────────────────────────┐");
+        PrintFormat("│  ✅ SELL EXECUTED: %s", symbol);
+        PrintFormat("│     Ticket: #%I64u", ticket);
+        PrintFormat("│     Date: %s", dateStr);
+        PrintFormat("│     Lot Size: %.2f", lotSize);
+        PrintFormat("│     Entry: %.5f (BID)", price);
+        PrintFormat("│     Stop Loss: %.5f (%.1f pips)", sl, riskPips);
+        PrintFormat("│     Take Profit: %.5f (%.1f pips)", tp, rewardPips);
+        PrintFormat("│     Risk/Reward: 1:%.1f", rewardPips/riskPips);
+        Print("└────────────────────────────────────────┘");
+        
+        g_stats[index].totalTrades++;
+        g_stats[index].lastTradeTime = TimeCurrent();
+        
+        return true;
+    }
+    else
+    {
+        PrintFormat("❌ SELL FAILED: %s", symbol);
+        PrintFormat("   Retcode: %d (%s)", 
+                   g_eaTrade.ResultRetcode(), 
+                   g_eaTrade.ResultRetcodeDescription());
+        return false;
     }
 }
-
-
-
 
