@@ -1720,97 +1720,6 @@ bool CheckH4Confirmation(const string symbol, const int index)
     if(g_htfData[index].h4ConfirmationReceived)
         return true; // Already confirmed, move to next step
     
-    // Get the LAST CLOSED H4 candle
-    double closeH4[], timeH4[];
-    if(CopyClose(symbol, PERIOD_H4, 1, 1, closeH4) <= 0)
-        return false;
-    if(CopyTime(symbol, PERIOD_H4, 1, 1, timeH4) <= 0)
-        return false;
-    
-    double h4Close = closeH4[0];
-    datetime h4Time = timeH4[0];
-    
-    // Skip if we already checked this H4 candle
-    if(h4Time <= g_htfData[index].h4ConfirmationTime)
-        return false;
-    
-    // Update last checked time (even if no confirmation)
-    g_htfData[index].h4ConfirmationTime = h4Time;
-    
-    // Check if this H4 candle closed AFTER the D1 breakout was detected
-    if(h4Time < g_htfData[index].d1BreakoutTime)
-        return false;
-    
-    // BULLISH: H4 must close above previous D1 high
-    if(g_htfData[index].breakoutUp && h4Close > g_htfData[index].high)
-//+------------------------------------------------------------------+
-//| NEW FUNCTION 1: Check D1 Breakout (ONE-TIME TRIGGER)             |
-//+------------------------------------------------------------------+
-bool CheckD1Breakout(const string symbol, const int index)
-{
-    // If already detected breakout today, skip
-    if(g_htfData[index].d1BreakoutDetected)
-        return true; // Already detected, move to next step
-    
-    // Get CURRENT D1 close
-    double closeD1[];
-    if(CopyClose(symbol, PERIOD_D1, 0, 1, closeD1) <= 0)
-        return false;
-    
-    double currentD1Close = closeD1[0];
-    
-    // Check BREAKOUT UP
-    if(currentD1Close > g_htfData[index].high)
-    {
-        g_htfData[index].d1BreakoutDetected = true;
-        g_htfData[index].d1BreakoutTime = TimeCurrent();
-        g_htfData[index].breakoutUp = true;
-        g_htfData[index].pendingDirection = ORDER_TYPE_BUY;
-        g_htfData[index].breakLevel = g_htfData[index].high;
-        
-        Print("┌────────────────────────────────────────┐");
-        PrintFormat("│  STEP 1/4: D1 BREAKOUT UP - %s", symbol);
-        PrintFormat("│  D1 Close: %.5f", currentD1Close);
-        PrintFormat("│  Prev D1 High: %.5f", g_htfData[index].high);
-        PrintFormat("│  ⏳ Waiting for H4 to close above %.5f", g_htfData[index].high);
-        Print("└────────────────────────────────────────┘");
-        return true;
-    }
-    
-    // Check BREAKOUT DOWN
-    if(currentD1Close < g_htfData[index].low)
-    {
-        g_htfData[index].d1BreakoutDetected = true;
-        g_htfData[index].d1BreakoutTime = TimeCurrent();
-        g_htfData[index].breakoutDown = true;
-        g_htfData[index].pendingDirection = ORDER_TYPE_SELL;
-        g_htfData[index].breakLevel = g_htfData[index].low;
-        
-        Print("┌────────────────────────────────────────┐");
-        PrintFormat("│  STEP 1/4: D1 BREAKOUT DOWN - %s", symbol);
-        PrintFormat("│  D1 Close: %.5f", currentD1Close);
-        PrintFormat("│  Prev D1 Low: %.5f", g_htfData[index].low);
-        PrintFormat("│  ⏳ Waiting for H4 to close below %.5f", g_htfData[index].low);
-        Print("└────────────────────────────────────────┘");
-        return true;
-    }
-    
-    return false; // No breakout yet
-}
-
-//+------------------------------------------------------------------+
-//| NEW FUNCTION 2: Wait for H4 Close in Breakout Direction          |
-//+------------------------------------------------------------------+
-bool CheckH4Confirmation(const string symbol, const int index)
-{
-    // Must have D1 breakout first
-    if(!g_htfData[index].d1BreakoutDetected)
-        return false;
-    
-    // Already got H4 confirmation
-    if(g_htfData[index].h4ConfirmationReceived)
-        return true; // Already confirmed, move to next step
-    
     // Get the LAST CLOSED H4 candle using iClose and iTime
     double h4Close = iClose(symbol, PERIOD_H4, 1);
     datetime h4Time = iTime(symbol, PERIOD_H4, 1);
@@ -2073,9 +1982,5 @@ bool ExecuteTrade(const string symbol, const int index, const ENUM_ORDER_TYPE or
         return false; // FAILED - but will still trigger lock to prevent repeated attempts
     }
 }
-
-
-
-
 
 
